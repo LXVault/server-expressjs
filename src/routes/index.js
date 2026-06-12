@@ -6,6 +6,8 @@ const { requireAuth } = require('../middleware/auth');
 
 const authRoutes = require('./auth');
 const documentRoutes = require('./documents');
+const tokenRoutes = require('./tokens');
+const mcpRoutes = require('./mcp');
 const { getProfile } = require('../controllers/profileController');
 const { getAnalysis } = require('../controllers/analysisController');
 
@@ -21,6 +23,10 @@ router.use('/auth', authRoutes);
 // Protected endpoints.
 router.get('/profile', requireAuth, getProfile);
 router.use('/documents', documentRoutes);
+router.use('/tokens', tokenRoutes);
 router.get('/analysis', requireAuth, getAnalysis);
+
+// MCP server endpoints (authenticated by per-project API token).
+router.use('/mcp', mcpRoutes);
 
 module.exports = router;

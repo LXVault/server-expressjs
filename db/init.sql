@@ -14,13 +14,21 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Per-project execution tokens. Each user may hold at most ONE active token
+-- per project (enforced by the uq_api_tokens_user_project unique index below).
+-- These tokens are presented by the MCP server so every action it performs can
+-- be traced back to the user who generated the token.
+-- NOTE: `project_id` references documents(id); the FK is added after the
+-- documents table is defined further down (forward-reference constraint).
 CREATE TABLE IF NOT EXISTS api_tokens (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id UUID,
     token_hash VARCHAR(255) UNIQUE NOT NULL,
-    token_name VARCHAR(100) NOT NULL,
+    token_name VARCHAR(100) NOT NULL DEFAULT 'Project token',
     expires_at TIMESTAMP WITH TIME ZONE,
     is_active BOOLEAN DEFAULT TRUE,
+    last_used_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -65,3 +73,30 @@ CREATE INDEX IF NOT EXISTS idx_document_chunks_doc_id ON document_chunks(documen
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_token_id ON audit_logs(token_id);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding ON document_chunks USING hnsw (embedding vector_cosine_ops);
+
+-- ---------------------------------------------------------------------------
+-- Per-project token wiring (runs after `documents` exists).
+-- Kept idempotent so it is safe on both fresh and pre-existing databases.
+-- ---------------------------------------------------------------------------
+
+-- Bring older databases up to date with the columns added above.
+ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS project_id UUID;
+ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP WITH TIME ZONE;
+
+-- Link a token to the project (document) it grants access to.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_api_tokens_project'
+    ) THEN
+        ALTER TABLE api_tokens
+            ADD CONSTRAINT fk_api_tokens_project
+            FOREIGN KEY (project_id) REFERENCES documents(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+-- Enforce: one user may hold at most one token per project.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_api_tokens_user_project
+    ON api_tokens(user_id, project_id);
+
+CREATE INDEX IF NOT EXISTS idx_api_tokens_project_id ON api_tokens(project_id);
