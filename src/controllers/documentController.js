@@ -11,23 +11,24 @@ function isUuid(value) {
 
 /**
  * Fetch a document and the caller's relationship to it.
- * Returns { document, isOwner, isMember } or null when not found.
+ * Returns { document, isOwner, isMember, memberRole, canEdit } or null.
+ * `canEdit` is true for the owner or a member with the 'admin' role.
  */
 async function loadAccess(documentId, userId) {
   const { rows } = await db.query(
     `SELECT d.*,
             (d.owner_id = $2) AS is_owner,
-            EXISTS (
-              SELECT 1 FROM document_members dm
-              WHERE dm.document_id = d.id AND dm.user_id = $2
-            ) AS is_member
+            (SELECT dm.role FROM document_members dm
+              WHERE dm.document_id = d.id AND dm.user_id = $2) AS member_role
      FROM documents d
      WHERE d.id = $1`,
     [documentId, userId]
   );
   if (!rows[0]) return null;
-  const { is_owner: isOwner, is_member: isMember, ...document } = rows[0];
-  return { document, isOwner, isMember };
+  const { is_owner: isOwner, member_role: memberRole, ...document } = rows[0];
+  const isMember = Boolean(memberRole);
+  const canEdit = isOwner || memberRole === 'admin';
+  return { document, isOwner, isMember, memberRole, canEdit };
 }
 
 /**
@@ -101,7 +102,59 @@ async function getDocument(req, res, next) {
     if (!access.isOwner && !access.isMember) {
       return res.status(403).json({ error: 'You do not have access to this document' });
     }
-    return res.json({ document: access.document, isOwner: access.isOwner });
+    return res.json({
+      document: access.document,
+      isOwner: access.isOwner,
+      role: access.isOwner ? 'owner' : access.memberRole,
+      canEdit: access.canEdit,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * PUT /api/documents/:id (protected, owner/admin only)
+ * Body: { title, summary }
+ * Updates a project's title and/or description.
+ */
+async function updateDocument(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ error: 'Invalid document id' });
+
+    const access = await loadAccess(id, req.user.id);
+    if (!access) return res.status(404).json({ error: 'Document not found' });
+    if (!access.canEdit) {
+      return res.status(403).json({
+        error: 'Only the project owner or an admin can edit this project',
+      });
+    }
+
+    const { title, summary } = req.body || {};
+    if (title === undefined && summary === undefined) {
+      return res.status(400).json({ error: 'Provide title and/or summary to update' });
+    }
+    if (title !== undefined && !String(title).trim()) {
+      return res.status(400).json({ error: 'title cannot be empty' });
+    }
+
+    // Only overwrite the fields that were supplied.
+    const nextTitle = title !== undefined ? String(title).trim() : access.document.title;
+    const nextSummary =
+      summary !== undefined
+        ? (String(summary).trim() || null)
+        : access.document.summary;
+
+    const { rows } = await db.query(
+      `UPDATE documents
+       SET title = $2, summary = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1
+       RETURNING id, title, summary, owner_id, embedding_model, created_at, updated_at`,
+      [id, nextTitle, nextSummary]
+    );
+
+    return res.json({ document: rows[0] });
   } catch (err) {
     return next(err);
   }
@@ -236,6 +289,7 @@ module.exports = {
   listDocuments,
   createDocument,
   getDocument,
+  updateDocument,
   listMembers,
   addMember,
   removeMember,
