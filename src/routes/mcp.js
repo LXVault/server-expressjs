@@ -5,7 +5,7 @@
 // traced back to them via audit_logs.
 const express = require('express');
 const { requireApiToken } = require('../middleware/apiToken');
-const { me, getProject, search } = require('../controllers/mcpController');
+const { me, getProject, search, addKnowledge } = require('../controllers/mcpController');
 
 const router = express.Router();
 
@@ -14,5 +14,6 @@ router.use(requireApiToken);
 router.get('/me', me);
 router.get('/project', getProject);
 router.post('/search', search);
+router.post('/knowledge', addKnowledge);
 
 module.exports = router;

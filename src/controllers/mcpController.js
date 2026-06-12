@@ -111,4 +111,53 @@ async function search(req, res, next) {
   }
 }
 
-module.exports = { me, getProject, search };
+/**
+ * POST /api/mcp/knowledge  (API-token auth)
+ * Body: { content }
+ * Appends a new chunk to the token's project knowledge base. The chunk is
+ * stored without an embedding (text-only); `search` finds it via ILIKE.
+ * Audited against the acting user + token so the write is traceable.
+ */
+async function addKnowledge(req, res, next) {
+  try {
+    const { tokenId, userId, projectId } = req.apiToken;
+    const { content } = req.body || {};
+
+    if (!content || !String(content).trim()) {
+      return res.status(400).json({ error: 'content is required' });
+    }
+    const text = String(content).trim();
+
+    // Append after the highest existing chunk_index for this project.
+    const { rows } = await db.query(
+      `INSERT INTO document_chunks (document_id, content, chunk_index)
+       VALUES (
+         $1,
+         $2,
+         COALESCE(
+           (SELECT MAX(chunk_index) + 1 FROM document_chunks WHERE document_id = $1),
+           0
+         )
+       )
+       RETURNING id, chunk_index, content, created_at`,
+      [projectId, text]
+    );
+
+    const chunk = rows[0];
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.add_knowledge',
+      resourceTable: 'document_chunks',
+      resourceId: chunk.id,
+      details: { chunk_index: chunk.chunk_index, length: text.length },
+    });
+
+    return res.status(201).json({ chunk });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+module.exports = { me, getProject, search, addKnowledge };
