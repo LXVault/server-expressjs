@@ -18,6 +18,15 @@ const config = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
   bcryptSaltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS, 10) || 10,
 
+  // Secret used to derive the AES-256 key that encrypts users' OpenRouter API
+  // keys at rest. MUST be overridden in production. Any string works — it is
+  // run through a KDF to produce a 32-byte key.
+  encryptionKey:
+    process.env.ENCRYPTION_KEY || 'default_encryption_key_change_me_in_production',
+
+  // OpenRouter (OpenAI-compatible) embeddings endpoint base URL.
+  openrouterBaseUrl: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };
 

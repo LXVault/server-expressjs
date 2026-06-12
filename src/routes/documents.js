@@ -15,6 +15,10 @@ const {
   generateProjectToken,
   revokeProjectToken,
 } = require('../controllers/tokenController');
+const {
+  getEmbeddingModel,
+  setEmbeddingModel,
+} = require('../controllers/projectModelController');
 
 const router = express.Router();
 
@@ -33,5 +37,9 @@ router.delete('/:id/members/:userId', removeMember);
 router.get('/:id/token', getProjectToken);
 router.post('/:id/token', generateProjectToken);
 router.delete('/:id/token', revokeProjectToken);
+
+// Per-project embedding model (read for members; change for owner/admin).
+router.get('/:id/embedding-model', getEmbeddingModel);
+router.put('/:id/embedding-model', setEmbeddingModel);
 
 module.exports = router;

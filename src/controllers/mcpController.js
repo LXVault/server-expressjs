@@ -2,11 +2,28 @@
 
 const db = require('../config/db');
 const { recordAudit } = require('../utils/audit');
+const { embedText, toVectorLiteral } = require('../utils/embeddings');
+const { getDecryptedOpenRouterKey } = require('../utils/userKeys');
+
+const NO_KEY_MESSAGE =
+  'No OpenRouter API key configured for your account. Add your own key in the ' +
+  'web app (Profile → OpenRouter API key) before using semantic search.';
+
+/**
+ * Fetch a project's currently selected embedding model.
+ * @returns {Promise<string|null>}
+ */
+async function getProjectModel(projectId) {
+  const { rows } = await db.query(
+    `SELECT embedding_model FROM documents WHERE id = $1`,
+    [projectId]
+  );
+  return rows[0] ? rows[0].embedding_model : null;
+}
 
 /**
  * GET /api/mcp/me  (API-token auth)
- * Identifies the user and project the presented token is bound to. This is the
- * primary "who am I executing as" probe used by the MCP server.
+ * Identifies the user and project the presented token is bound to.
  */
 async function me(req, res, next) {
   try {
@@ -32,8 +49,8 @@ async function me(req, res, next) {
 
 /**
  * GET /api/mcp/project  (API-token auth)
- * Returns details about the project the token grants access to, including a
- * chunk count so the agent knows how much knowledge is available.
+ * Returns details about the project the token grants access to, including its
+ * selected embedding model and a chunk count.
  */
 async function getProject(req, res, next) {
   try {
@@ -43,6 +60,7 @@ async function getProject(req, res, next) {
       `SELECT d.id,
               d.title,
               d.summary,
+              d.embedding_model,
               d.created_at,
               d.updated_at,
               COUNT(dc.id)::int AS chunk_count
@@ -72,8 +90,8 @@ async function getProject(req, res, next) {
 /**
  * POST /api/mcp/search  (API-token auth)
  * Body: { query, limit? }
- * Simple text search across the project's knowledge-base chunks. Every search
- * is audited against the acting user + token so executions are fully traceable.
+ * Semantic search: embeds the query with the project's model (using the acting
+ * user's own OpenRouter key) and ranks chunks by cosine similarity. Audited.
  */
 async function search(req, res, next) {
   try {
@@ -86,14 +104,24 @@ async function search(req, res, next) {
     const max = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 25);
     const term = String(query).trim();
 
+    const apiKey = await getDecryptedOpenRouterKey(userId);
+    if (!apiKey) return res.status(412).json({ error: NO_KEY_MESSAGE });
+
+    const model = await getProjectModel(projectId);
+    const queryVector = await embedText({ apiKey, model, input: term });
+
+    // Exact KNN by cosine distance; only compare chunks embedded with the
+    // project's current model so dimensions always match.
     const { rows } = await db.query(
-      `SELECT id, chunk_index, content
+      `SELECT id, chunk_index, content,
+              1 - (embedding <=> $2::vector) AS score
        FROM document_chunks
        WHERE document_id = $1
-         AND content ILIKE '%' || $2 || '%'
-       ORDER BY chunk_index ASC
-       LIMIT $3`,
-      [projectId, term, max]
+         AND embedding IS NOT NULL
+         AND embedding_model = $3
+       ORDER BY embedding <=> $2::vector
+       LIMIT $4`,
+      [projectId, toVectorLiteral(queryVector), model, max]
     );
 
     await recordAudit({
@@ -102,10 +130,10 @@ async function search(req, res, next) {
       actionType: 'mcp.search',
       resourceTable: 'documents',
       resourceId: projectId,
-      details: { query: term, results: rows.length },
+      details: { query: term, model, results: rows.length },
     });
 
-    return res.json({ query: term, results: rows, total: rows.length });
+    return res.json({ query: term, model, results: rows, total: rows.length });
   } catch (err) {
     return next(err);
   }
@@ -114,9 +142,8 @@ async function search(req, res, next) {
 /**
  * POST /api/mcp/knowledge  (API-token auth)
  * Body: { content }
- * Appends a new chunk to the token's project knowledge base. The chunk is
- * stored without an embedding (text-only); `search` finds it via ILIKE.
- * Audited against the acting user + token so the write is traceable.
+ * Embeds the text with the project's model (using the acting user's OpenRouter
+ * key) and stores it as a new chunk. Audited against the acting user + token.
  */
 async function addKnowledge(req, res, next) {
   try {
@@ -128,19 +155,26 @@ async function addKnowledge(req, res, next) {
     }
     const text = String(content).trim();
 
-    // Append after the highest existing chunk_index for this project.
+    const apiKey = await getDecryptedOpenRouterKey(userId);
+    if (!apiKey) return res.status(412).json({ error: NO_KEY_MESSAGE });
+
+    const model = await getProjectModel(projectId);
+    const vector = await embedText({ apiKey, model, input: text });
+
     const { rows } = await db.query(
-      `INSERT INTO document_chunks (document_id, content, chunk_index)
+      `INSERT INTO document_chunks (document_id, content, chunk_index, embedding, embedding_model)
        VALUES (
          $1,
          $2,
          COALESCE(
            (SELECT MAX(chunk_index) + 1 FROM document_chunks WHERE document_id = $1),
            0
-         )
+         ),
+         $3::vector,
+         $4
        )
-       RETURNING id, chunk_index, content, created_at`,
-      [projectId, text]
+       RETURNING id, chunk_index, content, embedding_model, created_at`,
+      [projectId, text, toVectorLiteral(vector), model]
     );
 
     const chunk = rows[0];
@@ -151,7 +185,7 @@ async function addKnowledge(req, res, next) {
       actionType: 'mcp.add_knowledge',
       resourceTable: 'document_chunks',
       resourceId: chunk.id,
-      details: { chunk_index: chunk.chunk_index, length: text.length },
+      details: { chunk_index: chunk.chunk_index, model, length: text.length },
     });
 
     return res.status(201).json({ chunk });
