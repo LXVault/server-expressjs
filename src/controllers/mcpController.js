@@ -194,4 +194,225 @@ async function addKnowledge(req, res, next) {
   }
 }
 
-module.exports = { me, getProject, search, addKnowledge };
+// Roles a member may be granted.
+const ALLOWED_MEMBER_ROLES = ['editor', 'viewer', 'admin'];
+
+/**
+ * Authorisation guard for project-mutating MCP tools.
+ *
+ * SECURITY: the caller's role is resolved ENTIRELY from server-side data — the
+ * user + project bound to the presented API token — never from tool arguments.
+ * This means a prompt-injected tool call cannot escalate privileges or target
+ * a different project: the LLM has no way to assert "I am an admin" or to point
+ * the mutation at someone else's project. Throws 403 if the token's user is not
+ * the owner or an admin of the token's project.
+ *
+ * @returns {Promise<{isOwner: boolean, role: string|null, ownerId: string}>}
+ */
+async function assertProjectAdmin(projectId, userId) {
+  const { rows } = await db.query(
+    `SELECT d.owner_id,
+            (d.owner_id = $2) AS is_owner,
+            (SELECT dm.role FROM document_members dm
+              WHERE dm.document_id = d.id AND dm.user_id = $2) AS member_role
+     FROM documents d
+     WHERE d.id = $1`,
+    [projectId, userId]
+  );
+  if (!rows[0]) {
+    const err = new Error('Project not found');
+    err.status = 404;
+    throw err;
+  }
+  const isOwner = rows[0].is_owner;
+  const role = rows[0].member_role;
+  if (!(isOwner || role === 'admin')) {
+    const err = new Error('Forbidden: you must be the project owner or an admin');
+    err.status = 403;
+    throw err;
+  }
+  return { isOwner, role, ownerId: rows[0].owner_id };
+}
+
+/**
+ * POST /api/mcp/projects  (API-token auth)
+ * Body: { title, summary? }
+ * Creates a NEW project owned by the token's user. The owner is taken from the
+ * token (req.apiToken.userId), so it cannot be spoofed via tool arguments.
+ */
+async function createProject(req, res, next) {
+  try {
+    const { userId, tokenId } = req.apiToken;
+    const { title, summary } = req.body || {};
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ error: 'title is required' });
+    }
+
+    const { rows } = await db.query(
+      `INSERT INTO documents (owner_id, title, summary)
+       VALUES ($1, $2, $3)
+       RETURNING id, title, summary, owner_id, embedding_model, created_at, updated_at`,
+      [userId, String(title).trim(), summary ? String(summary).trim() : null]
+    );
+    const project = rows[0];
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.create_project',
+      resourceTable: 'documents',
+      resourceId: project.id,
+      details: { title: project.title },
+    });
+
+    return res.status(201).json({ project });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * PUT /api/mcp/project/title  (API-token auth, owner/admin only)
+ * Body: { title }
+ * Renames the token's bound project. Target project = req.apiToken.projectId
+ * (never taken from arguments).
+ */
+async function updateProjectTitle(req, res, next) {
+  try {
+    const { userId, tokenId, projectId } = req.apiToken;
+    const { title } = req.body || {};
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ error: 'title is required' });
+    }
+
+    await assertProjectAdmin(projectId, userId);
+
+    const { rows } = await db.query(
+      `UPDATE documents SET title = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1
+       RETURNING id, title, summary, updated_at`,
+      [projectId, String(title).trim()]
+    );
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.change_project_title',
+      resourceTable: 'documents',
+      resourceId: projectId,
+      details: { title: rows[0].title },
+    });
+
+    return res.json({ project: rows[0] });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * PUT /api/mcp/project/description  (API-token auth, owner/admin only)
+ * Body: { description }
+ * Updates the token's bound project description (stored as summary).
+ */
+async function updateProjectDescription(req, res, next) {
+  try {
+    const { userId, tokenId, projectId } = req.apiToken;
+    const { description } = req.body || {};
+    if (description === undefined || description === null) {
+      return res.status(400).json({ error: 'description is required' });
+    }
+
+    await assertProjectAdmin(projectId, userId);
+
+    const summary = String(description).trim() || null;
+    const { rows } = await db.query(
+      `UPDATE documents SET summary = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1
+       RETURNING id, title, summary, updated_at`,
+      [projectId, summary]
+    );
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.change_project_description',
+      resourceTable: 'documents',
+      resourceId: projectId,
+      details: { length: summary ? summary.length : 0 },
+    });
+
+    return res.json({ project: rows[0] });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * POST /api/mcp/project/members  (API-token auth, owner/admin only)
+ * Body: { identifier (username or email), role? }
+ * Adds (or updates the role of) a member on the token's bound project.
+ */
+async function addProjectMember(req, res, next) {
+  try {
+    const { userId, tokenId, projectId } = req.apiToken;
+    const { identifier, role = 'editor' } = req.body || {};
+    if (!identifier || !String(identifier).trim()) {
+      return res.status(400).json({ error: 'identifier (username or email) is required' });
+    }
+    if (!ALLOWED_MEMBER_ROLES.includes(role)) {
+      return res
+        .status(400)
+        .json({ error: `role must be one of: ${ALLOWED_MEMBER_ROLES.join(', ')}` });
+    }
+
+    const { ownerId } = await assertProjectAdmin(projectId, userId);
+
+    const target = String(identifier).trim();
+    const userResult = await db.query(
+      `SELECT id, username, email FROM users WHERE username = $1 OR email = $1`,
+      [target]
+    );
+    const user = userResult.rows[0];
+    if (!user) {
+      return res.status(404).json({ error: `No user found matching "${target}"` });
+    }
+    if (user.id === ownerId) {
+      return res.status(409).json({ error: 'That user already owns this project' });
+    }
+
+    const { rows } = await db.query(
+      `INSERT INTO document_members (document_id, user_id, role)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (document_id, user_id)
+       DO UPDATE SET role = EXCLUDED.role
+       RETURNING user_id, role, added_at`,
+      [projectId, user.id, role]
+    );
+
+    const member = { ...rows[0], username: user.username, email: user.email };
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.add_member',
+      resourceTable: 'document_members',
+      resourceId: projectId,
+      details: { addedUserId: user.id, role },
+    });
+
+    return res.status(201).json({ member });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+module.exports = {
+  me,
+  getProject,
+  search,
+  addKnowledge,
+  createProject,
+  updateProjectTitle,
+  updateProjectDescription,
+  addProjectMember,
+};
