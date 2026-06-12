@@ -6,6 +6,7 @@ const {
   listDocuments,
   createDocument,
   getDocument,
+  updateDocument,
   listMembers,
   addMember,
   removeMember,
@@ -28,6 +29,7 @@ router.use(requireAuth);
 router.get('/', listDocuments);
 router.post('/', createDocument);
 router.get('/:id', getDocument);
+router.put('/:id', updateDocument);
 
 router.get('/:id/members', listMembers);
 router.post('/:id/members', addMember);
