@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS documents (
     owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title VARCHAR(255) NOT NULL,
     summary TEXT,
+    -- OpenRouter embedding model used for this project's semantic search.
+    -- Configurable by the project owner/admins.
+    embedding_model VARCHAR(100) NOT NULL DEFAULT 'openai/text-embedding-3-small',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -53,7 +56,11 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     content TEXT NOT NULL,
-    embedding vector(1536),
+    -- Dimensionless `vector` so projects can pick embedding models of different
+    -- sizes. `embedding_model` records which model produced this vector; search
+    -- only compares chunks embedded with the project's current model (same dim).
+    embedding vector,
+    embedding_model VARCHAR(100),
     chunk_index INTEGER NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -72,7 +79,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_document_chunks_doc_id ON document_chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_token_id ON audit_logs(token_id);
-CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding ON document_chunks USING hnsw (embedding vector_cosine_ops);
+-- NOTE: no HNSW/ivfflat index on `embedding` — the column is dimensionless to
+-- allow per-project model choice, and pgvector ANN indexes require a fixed
+-- dimension. Search uses exact KNN (`<=>`), which is fine at this scale.
 
 -- ---------------------------------------------------------------------------
 -- Per-project token wiring (runs after `documents` exists).
@@ -100,3 +109,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_api_tokens_user_project
     ON api_tokens(user_id, project_id);
 
 CREATE INDEX IF NOT EXISTS idx_api_tokens_project_id ON api_tokens(project_id);
+
+-- ---------------------------------------------------------------------------
+-- Semantic search wiring (idempotent for pre-existing databases).
+-- ---------------------------------------------------------------------------
+
+-- Per-project embedding model + per-chunk provenance.
+ALTER TABLE documents
+    ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(100)
+    NOT NULL DEFAULT 'openai/text-embedding-3-small';
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(100);
+
+-- Relax the embedding column to a dimensionless vector so projects can choose
+-- models of differing sizes. Drop the dimension-specific ANN index first.
+DROP INDEX IF EXISTS idx_document_chunks_embedding;
+ALTER TABLE document_chunks ALTER COLUMN embedding TYPE vector;
+
+-- Per-user OpenRouter API key, encrypted at rest (AES-256-GCM).
+-- One row per user; the secret lives in its own table, isolated from `users`.
+-- We store ciphertext + iv + auth tag separately (never a hash — it must be
+-- decryptable for outbound OpenRouter calls).
+CREATE TABLE IF NOT EXISTS user_openrouter_keys (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    key_ciphertext TEXT NOT NULL,
+    key_iv TEXT NOT NULL,
+    key_auth_tag TEXT NOT NULL,
+    key_last4 VARCHAR(8),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
