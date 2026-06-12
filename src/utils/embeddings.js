@@ -2,8 +2,9 @@
 
 const config = require('../config/env');
 
-// Embedding models selectable per project. Kept as an allowlist so an arbitrary
-// (and possibly non-embedding) model id can't be injected via the API.
+// Suggested embedding models surfaced in the UI. Projects may also enter any
+// other OpenRouter model id manually, so this is a convenience list — not a
+// hard allowlist.
 const EMBEDDING_MODELS = [
   'openai/text-embedding-3-small',
   'openai/text-embedding-3-large',
@@ -12,8 +13,12 @@ const EMBEDDING_MODELS = [
 
 const DEFAULT_EMBEDDING_MODEL = 'openai/text-embedding-3-small';
 
-function isAllowedModel(model) {
-  return EMBEDDING_MODELS.includes(model);
+// A model id is a provider-namespaced slug, e.g. "openai/text-embedding-3-small".
+// We still validate the shape so junk/oversized strings can't be stored or sent.
+const MODEL_ID_RE = /^[A-Za-z0-9._/:-]{1,100}$/;
+
+function isValidModelId(model) {
+  return typeof model === 'string' && MODEL_ID_RE.test(model);
 }
 
 /**
@@ -32,8 +37,8 @@ async function embedText({ apiKey, model, input }) {
     err.status = 412;
     throw err;
   }
-  if (!isAllowedModel(model)) {
-    const err = new Error(`Unsupported embedding model: ${model}`);
+  if (!isValidModelId(model)) {
+    const err = new Error(`Invalid embedding model id: ${model}`);
     err.status = 400;
     throw err;
   }
@@ -89,7 +94,7 @@ function toVectorLiteral(vector) {
 module.exports = {
   EMBEDDING_MODELS,
   DEFAULT_EMBEDDING_MODEL,
-  isAllowedModel,
+  isValidModelId,
   embedText,
   toVectorLiteral,
 };

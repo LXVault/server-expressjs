@@ -1,7 +1,7 @@
 'use strict';
 
 const db = require('../config/db');
-const { EMBEDDING_MODELS, isAllowedModel } = require('../utils/embeddings');
+const { EMBEDDING_MODELS, isValidModelId } = require('../utils/embeddings');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -68,10 +68,10 @@ async function setEmbeddingModel(req, res, next) {
     const { id } = req.params;
     if (!isUuid(id)) return res.status(400).json({ error: 'Invalid project id' });
 
-    const { model } = req.body || {};
-    if (!model || !isAllowedModel(model)) {
+    const model = req.body && typeof req.body.model === 'string' ? req.body.model.trim() : '';
+    if (!isValidModelId(model)) {
       return res.status(400).json({
-        error: `model must be one of: ${EMBEDDING_MODELS.join(', ')}`,
+        error: 'model must be a valid OpenRouter model id (letters, numbers and . _ / : -)',
       });
     }
 
