@@ -44,7 +44,11 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: ${PORT:-4000}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://mcp_user:mcp_password@db:5432/mcp_rag}
+      # Always target the `db` service on the compose network. We build this
+      # from the credential parts (rather than ${DATABASE_URL}) so a localhost
+      # DATABASE_URL in .env — meant for running the backend outside Docker —
+      # can't leak in and point the container at itself.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mcp_user}:${POSTGRES_PASSWORD:-mcp_password}@db:5432/${POSTGRES_DB:-mcp_rag}
       JWT_SECRET: ${JWT_SECRET:-default_jwt_secret_for_development}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
       BCRYPT_SALT_ROUNDS: ${BCRYPT_SALT_ROUNDS:-10}
