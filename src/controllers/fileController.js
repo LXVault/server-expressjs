@@ -131,14 +131,19 @@ async function uploadFiles(req, res, next) {
           details: { filename: record.filename, chunks: record.chunk_count, model },
         });
       } catch (fileErr) {
+        // Log server-side too — these are swallowed into `failed` otherwise, so
+        // the Render logs would show nothing about why an upload failed.
+        console.error(`[upload] "${file.originalname}" failed: ${fileErr.message}`);
         failed.push({ filename: file.originalname, error: fileErr.message });
       }
     }
 
     if (uploaded.length === 0) {
-      // Nothing succeeded — surface the first failure's status where sensible.
+      // Nothing succeeded — surface the actual per-file reasons so the cause
+      // (e.g. an embedding/API-key problem) is visible in the UI, not hidden.
+      const reasons = failed.map((f) => `${f.filename}: ${f.error}`).join('; ');
       return res.status(422).json({
-        error: 'No files could be ingested',
+        error: `No files could be ingested — ${reasons}`,
         failed,
       });
     }
