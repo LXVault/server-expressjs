@@ -3,6 +3,7 @@
 const app = require('./app');
 const config = require('./config/env');
 const { healthCheck } = require('./config/db');
+const { runMigrations } = require('./config/migrate');
 
 const server = app.listen(config.port, async () => {
   console.log(`[server] listening on port ${config.port} (${config.nodeEnv})`);
@@ -12,6 +13,12 @@ const server = app.listen(config.port, async () => {
   } catch (err) {
     // Non-fatal: the server still serves requests; DB-backed routes will error.
     console.warn('[db] connection check failed:', err.message);
+  }
+  try {
+    // Apply the idempotent schema so a fresh/managed database is ready to use.
+    await runMigrations();
+  } catch (err) {
+    console.error('[migrate] failed to apply schema:', err.message);
   }
 });
 
