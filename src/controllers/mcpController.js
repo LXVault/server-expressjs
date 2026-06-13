@@ -4,6 +4,7 @@ const db = require('../config/db');
 const { recordAudit } = require('../utils/audit');
 const { embedText, toVectorLiteral } = require('../utils/embeddings');
 const { getDecryptedOpenRouterKey } = require('../utils/userKeys');
+const { ingestFile, ALLOWED_EXTENSIONS, isAllowedFilename } = require('../utils/fileIngest');
 
 const NO_KEY_MESSAGE =
   'No OpenRouter API key configured for your account. Add your own key in the ' +
@@ -406,6 +407,77 @@ async function addProjectMember(req, res, next) {
   }
 }
 
+/**
+ * POST /api/mcp/files  (API-token auth, owner/admin only)
+ * Body: { filename, content? , contentBase64? }
+ * Uploads a knowledge file to the token's bound project. Text files (.md/.txt)
+ * may be sent as `content`; binary files (.pdf) must be sent as base64 in
+ * `contentBase64`. The file is chunked, embedded with the project's model using
+ * the acting user's OpenRouter key, and stored. Owner/admin enforced from the
+ * token — never from arguments.
+ */
+async function uploadFile(req, res, next) {
+  try {
+    const { userId, tokenId, projectId } = req.apiToken;
+    const { filename, content, contentBase64 } = req.body || {};
+
+    if (!filename || !String(filename).trim()) {
+      return res.status(400).json({ error: 'filename is required' });
+    }
+    const name = String(filename).trim();
+    if (!isAllowedFilename(name)) {
+      return res
+        .status(400)
+        .json({ error: `Unsupported file type. Allowed: ${ALLOWED_EXTENSIONS.join(', ')}` });
+    }
+    if (!content && !contentBase64) {
+      return res
+        .status(400)
+        .json({ error: 'Provide file contents as "content" (text) or "contentBase64"' });
+    }
+
+    // Decode to a buffer. Base64 wins when both are present.
+    let buffer;
+    if (contentBase64) {
+      try {
+        buffer = Buffer.from(String(contentBase64), 'base64');
+      } catch {
+        return res.status(400).json({ error: 'contentBase64 is not valid base64' });
+      }
+    } else {
+      buffer = Buffer.from(String(content), 'utf8');
+    }
+
+    await assertProjectAdmin(projectId, userId);
+
+    const apiKey = await getDecryptedOpenRouterKey(userId);
+    if (!apiKey) return res.status(412).json({ error: NO_KEY_MESSAGE });
+
+    const model = await getProjectModel(projectId);
+    const file = await ingestFile({
+      projectId,
+      userId,
+      apiKey,
+      model,
+      filename: name,
+      buffer,
+    });
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.upload_file',
+      resourceTable: 'document_files',
+      resourceId: file.id,
+      details: { filename: file.filename, chunks: file.chunk_count, model },
+    });
+
+    return res.status(201).json({ file });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   me,
   getProject,
@@ -415,4 +487,5 @@ module.exports = {
   updateProjectTitle,
   updateProjectDescription,
   addProjectMember,
+  uploadFile,
 };

@@ -14,6 +14,7 @@ const {
   updateProjectTitle,
   updateProjectDescription,
   addProjectMember,
+  uploadFile,
 } = require('../controllers/mcpController');
 
 const router = express.Router();
@@ -24,6 +25,7 @@ router.get('/me', me);
 router.get('/project', getProject);
 router.post('/search', search);
 router.post('/knowledge', addKnowledge);
+router.post('/files', uploadFile);
 
 // Project management (owner/admin enforced server-side from the token).
 router.post('/projects', createProject);
