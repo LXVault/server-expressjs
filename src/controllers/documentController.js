@@ -46,7 +46,9 @@ async function listDocuments(req, res, next) {
               COALESCE(dm.role, 'owner') AS role,
               d.created_at,
               d.updated_at,
-              COUNT(dc.id)::int AS chunk_count
+              COUNT(dc.id)::int AS chunk_count,
+              (SELECT COUNT(*)::int FROM document_files df
+                WHERE df.document_id = d.id) AS file_count
        FROM documents d
        LEFT JOIN document_members dm
               ON dm.document_id = d.id AND dm.user_id = $1

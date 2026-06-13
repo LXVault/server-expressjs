@@ -9,7 +9,9 @@ const app = express();
 
 // --- Essential middleware ---
 app.use(cors({ origin: config.corsOrigin }));
-app.use(express.json());
+// Raised from the 100kb default so base64-encoded file uploads via the MCP
+// endpoint (/api/mcp/files) fit. Multipart web uploads bypass this (multer).
+app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // --- Health check ---

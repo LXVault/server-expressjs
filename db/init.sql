@@ -138,3 +138,31 @@ CREATE TABLE IF NOT EXISTS user_openrouter_keys (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ---------------------------------------------------------------------------
+-- Knowledge-base file uploads (RAG ingestion).
+-- ---------------------------------------------------------------------------
+-- A project's knowledge base can be populated by uploading source files
+-- (.md / .txt / .pdf). Each uploaded file is recorded here as a single row —
+-- the "central index" of what a project was built from — while its extracted
+-- text is split into many `document_chunks` (one embedding per chunk) for
+-- semantic search. Deleting a file row cascades to all of its chunks.
+CREATE TABLE IF NOT EXISTS document_files (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    uploaded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    filename VARCHAR(255) NOT NULL,
+    file_type VARCHAR(10) NOT NULL,            -- md | txt | pdf
+    byte_size INTEGER,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_files_doc_id ON document_files(document_id);
+
+-- Link each chunk back to the file it was extracted from so deleting a file
+-- removes exactly its chunks. NULL for chunks added directly (e.g. add_knowledge).
+ALTER TABLE document_chunks
+    ADD COLUMN IF NOT EXISTS file_id UUID REFERENCES document_files(id) ON DELETE CASCADE;
+
+CREATE INDEX IF NOT EXISTS idx_document_chunks_file_id ON document_chunks(file_id);
