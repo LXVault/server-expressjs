@@ -7,8 +7,31 @@ const { healthCheck } = require('./config/db');
 
 const app = express();
 
+// Build a forgiving CORS policy from CORS_ORIGIN.
+//   - unset or '*'  -> reflect any origin (the app uses bearer tokens, not
+//     cookies, so this is safe and avoids deploy-time friction)
+//   - otherwise     -> a comma-separated allow-list, compared with trailing
+//     slashes stripped so "https://app.com/" and "https://app.com" both match
+function buildCorsOptions(raw) {
+  const trimmed = (raw || '').trim();
+  if (!trimmed || trimmed === '*') {
+    return { origin: true };
+  }
+  const allow = trimmed
+    .split(',')
+    .map((s) => s.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+  return {
+    origin(origin, cb) {
+      // Non-browser clients (curl, the MCP server) send no Origin — allow them.
+      if (!origin) return cb(null, true);
+      return cb(null, allow.includes(origin.replace(/\/+$/, '')));
+    },
+  };
+}
+
 // --- Essential middleware ---
-app.use(cors({ origin: config.corsOrigin }));
+app.use(cors(buildCorsOptions(config.corsOrigin)));
 // Raised from the 100kb default so base64-encoded file uploads via the MCP
 // endpoint (/api/mcp/files) fit. Multipart web uploads bypass this (multer).
 app.use(express.json({ limit: '20mb' }));
