@@ -65,8 +65,15 @@ exercise the route you changed. Report it that way; do not imply a suite ran.
 * **No server owned OpenRouter key.** Embedding calls spend the acting user's key. Code
   paths that assume a key is always present are wrong; a missing key is a `412`.
 * **The `embedding` column has no dimension and no ANN index.** That is deliberate, so
-  projects can pick models of different sizes. Do not add an index without fixing the
-  dimension first.
+  projects can pick models of different sizes and hold rows for two of them at once. Do not
+  add an index without fixing the dimension first.
+* **A chunk's text and its vector are different rows.** `document_chunks` is content;
+  `document_chunk_embeddings` is one vector per `(chunk_id, model_name)`. Writing a chunk
+  means writing both, in one transaction.
+* **A chunk count is not a searchable count.** Search only sees chunks with a vector for
+  the project's current model, so report coverage from
+  `src/utils/embeddingCoverage.js` rather than counting chunks and implying they are all
+  reachable.
 * **The whole schema is sent through the simple query protocol** in one `pool.query(sql)`,
   so `db/init.sql` must contain no bind parameters.
 
