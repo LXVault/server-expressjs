@@ -71,14 +71,29 @@ MCP route that accepts a project id, a user id, or a role as a parameter.
   `user_openrouter_keys`. A missing key is a `412`, never a fallback to someone else's key.
 * All outbound embedding traffic goes through `embedText` in `src/utils/embeddings.js`.
   Do not call the OpenRouter endpoint directly from a controller.
+* **Content and vectors are separate tables.** `document_chunks` holds the text;
+  `document_chunk_embeddings` holds one vector per `(chunk_id, model_name)`. Never add an
+  embedding column back to `document_chunks`: that shape is what made a model change
+  destroy a knowledge base, and the split is the fix.
+* **A model change is additive and must stay that way.** Nothing deletes a vector
+  implicitly. Selecting a different model only updates `documents.embedding_model`, and the
+  old vectors stay so switching back costs nothing. The only route that removes a vector is
+  the explicit delete, and it refuses to touch the model currently selected.
+* **Report coverage wherever you report a chunk count.** A chunk with no row for the
+  current model is invisible to search, so a bare count makes an uncovered knowledge base
+  look empty. Use `src/utils/embeddingCoverage.js` rather than counting chunks inline.
 * The `embedding` column is a **dimensionless** `vector` so projects can choose models of
-  different sizes. That is why there is no HNSW or ivfflat index on it: pgvector's ANN
-  indexes need a fixed dimension. Search uses exact KNN with `<=>`. Do not add an ANN index
-  without first fixing the dimension, and do not compare vectors produced by two different
-  models.
-* Any value written to a `model_name` column is normalized first, per the shared
-  `agents_model_naming_convention` tool. Call it before adding a platform or a new write
-  site.
+  different sizes, and two models' rows can sit in the table at once. That is why there is
+  no HNSW or ivfflat index on it: pgvector's ANN indexes need a fixed dimension. Search
+  uses exact KNN with `<=>`, joined on `model_name` so vectors from two models are never
+  compared. Do not add an ANN index without first fixing the dimension.
+* **Every write to a `model_name` column goes through `normalizeModelName`**, which trims
+  and lower-cases, per the shared `agents_model_naming_convention` tool. Enforce the full
+  `{platform}/{model}` shape with `isConventionalModelId` where a person chooses a model;
+  keep reads tolerant, because an older database may hold a bare name.
+* **Backfilling is explicit and batched.** It spends the caller's OpenRouter credits, so
+  nothing triggers it implicitly, and it stops at `BACKFILL_BATCH_LIMIT` rather than
+  running for minutes. It only inserts, so repeating it is safe.
 
 ## Naming
 

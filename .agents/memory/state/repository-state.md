@@ -33,20 +33,34 @@ connector, adopted version `1.0.0`. Nothing from it is copied into this reposito
 
 ## What is not built
 
-* No test suite and no linter configuration.
+* No test suite and no linter configuration. The end to end check that verified the
+  embedding split was written for that task and run against a local database; it is not
+  part of the repository.
 * No CI workflow.
 * No migrations tooling. `db/init.sql` is applied idempotently on boot instead.
 * No rate limiting on the API.
+* No automatic backfill. Changing a project's embedding model never spends the user's
+  OpenRouter credits on its own, by design.
 
-## Known limitation being worked on
+## Embedding model handling
 
-`document_chunks` stores the content and its embedding in the same row, with a single
-`embedding_model` column. A project can therefore hold exactly one model's vectors, and
-changing `documents.embedding_model` makes every existing chunk invisible to search, since
-`mcpController.search` filters on an exact model match. Recovering means deleting and
-re-uploading the knowledge base.
+Resolved in `1.1.0`. Content and vectors are separate tables:
+`document_chunks` holds text, `document_chunk_embeddings` holds one vector per
+`(chunk_id, model_name)`. A project can hold vectors for several models at once, changing
+the selected model deletes nothing, and switching back to a model the project already
+covered is instant.
+
+Chunks with no vector for the newly selected model are reported as pending coverage rather
+than silently missing, and `POST /api/documents/:id/embeddings/backfill` embeds them in
+batches of 100 using the caller's own OpenRouter key. Removing a model's vectors is a
+deliberate call and is refused for the model currently selected.
+
+Verified against PostgreSQL 16 with pgvector 0.6.0: the migration moves an older
+database's single vector per chunk into the new table, collapses case variants of a model
+name, is a no-op on every later boot, and search returns ranked rows on migrated data.
 
 ## Next obvious step
 
-Split content from embeddings so one chunk can carry a vector per model, keyed on
-`(chunk_id, model_name)`, and make a model switch non destructive.
+Surface coverage in the web app so a project owner can see that a switch left chunks
+pending, and update the MCP tool descriptions so an assistant explains an uncovered
+knowledge base instead of reporting it as empty.

@@ -12,6 +12,7 @@ description: Release history of this backend, newest version first, with the fil
 
 | Version | Summary | Files |
 |---|---|---|
+| [`1.1.0`](../../wiki/logs/1/1/0/CHANGELOG.md) | One embedding per chunk per model, so changing a project's embedding model no longer destroys its knowledge base. | `CHANGELOG.md` |
 | [`1.0.0`](../../wiki/logs/1/0/0/CHANGELOG.md) | The service as it stands, plus the agent instruction, knowledge and memory system. | `CHANGELOG.md` |
 
 ## Maintenance

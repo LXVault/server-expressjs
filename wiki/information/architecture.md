@@ -55,7 +55,9 @@ injection can set.
 | `GET /api/documents/:id/members`, `POST`, `DELETE /:userId` | JWT | Membership, managed by the owner. |
 | `GET /api/documents/:id/files`, `POST`, `DELETE /:fileId` | JWT | The project's source files. Upload and delete need owner or admin. |
 | `GET /api/documents/:id/token`, `POST`, `DELETE` | JWT | The caller's project token. |
-| `GET /api/documents/:id/embedding-model`, `PUT` | JWT | Read the project's model; change it as owner or admin. |
+| `GET /api/documents/:id/embedding-model`, `PUT` | JWT | Read the project's model plus its coverage and stored models; change it as owner or admin. |
+| `POST /api/documents/:id/embeddings/backfill` | JWT | Embed the chunks with no vector for the current model, using the caller's own key. Owner or admin. |
+| `DELETE /api/documents/:id/embeddings/:model` | JWT | Drop every vector held for one model. Owner or admin, and never the model in use. |
 | `GET /api/tokens` | JWT | Every token the caller holds. |
 | `GET /api/analysis` | JWT | Aggregates for the web app's charts. |
 | `GET /api/mcp/me`, `GET /api/mcp/project` | token | Who and which project this token is bound to. |
@@ -73,19 +75,41 @@ PostgreSQL with the `vector` extension. Defined entirely in `db/init.sql`.
 | `documents` | `id` | A project: owner, title, summary, `embedding_model`. |
 | `document_members` | `(document_id, user_id)` | Membership and role. |
 | `document_files` | `id` | An uploaded source file and its chunk count. |
-| `document_chunks` | `id` | A slice of text with its `embedding` and the `embedding_model` that produced it. Cascades from both the project and the file. |
+| `document_chunks` | `id` | A slice of text. Content only. Cascades from both the project and the file. |
+| `document_chunk_embeddings` | `(chunk_id, model_name)` | One vector per chunk per embedding model, with the dimension it came out at. Cascades from the chunk. |
 | `api_tokens` | `id` | A per project execution token, hashed. Unique on `(user_id, project_id)`. |
 | `user_openrouter_keys` | `user_id` | The user's OpenRouter key as ciphertext, IV and auth tag, plus the last four characters for display. |
 | `audit_logs` | `id` | Actor, token, action type, target and details. |
 
-Two schema decisions worth knowing:
+Three schema decisions worth knowing:
 
-* **`document_chunks.embedding` is a dimensionless `vector`.** Projects choose models of
-  different sizes, and a fixed dimension would prevent that. The cost is that pgvector's
-  HNSW and ivfflat indexes cannot be used, since they require a fixed dimension, so search
-  runs an exact KNN with `<=>`. That is acceptable at the current scale.
+* **Content and vectors are separate tables.** A chunk's text is written once, while a
+  vector exists per embedding model, and a project may change model at any time. Holding
+  both in one row meant a chunk could carry exactly one model's vector, so changing the
+  model made the whole knowledge base unsearchable until it was deleted and re-uploaded.
+  Keyed on `(chunk_id, model_name)`, a model change is additive: the previous model's
+  vectors stay, switching back is instant, and the only cost of a new model is embedding
+  the chunks that have no row for it yet.
+* **`document_chunk_embeddings.embedding` is a dimensionless `vector`.** Projects choose
+  models of different sizes, and two of them can hold rows in this table at the same time,
+  so a fixed dimension is not available. The cost is that pgvector's HNSW and ivfflat
+  indexes cannot be used, since they require one, so search runs an exact KNN with `<=>`.
+  That is acceptable at the current scale.
 * **`api_tokens.project_id` references `documents(id)`** through a constraint added after
   the table, because the two tables reference each other in definition order.
+
+## Coverage
+
+Because a chunk is only searchable when it has a vector for the project's *current* model,
+a chunk count on its own is misleading: an uncovered knowledge base and an empty one look
+identical from a search result. Every endpoint that reports on a project therefore reports
+coverage as well, meaning the total chunks, how many are embedded with the selected model,
+and how many are still pending. `src/utils/embeddingCoverage.js` owns those two queries.
+
+Backfilling is explicit rather than automatic. Changing the model is instant and spends
+nothing, and the separate backfill call is what spends the caller's OpenRouter credits, in
+batches of 100 chunks so one request cannot run for minutes. It only ever inserts, so
+repeating it is safe and is how a large project is covered.
 
 ## Schema application
 
@@ -99,6 +123,18 @@ The whole script goes through node-postgres in one `pool.query(sql)` call, which
 simple query protocol and therefore executes every statement, including the dollar quoted
 `DO` blocks, in a single round trip. It also means the script may contain no bind
 parameters.
+
+## Model identifiers
+
+A stored model name follows the shared `{platform}/{model}` convention and is lower-cased
+before it is written, so `OpenAI/Text-Embedding-3-Small` and
+`openai/text-embedding-3-small` cannot both exist as rows for one chunk.
+`normalizeModelName` in `src/utils/embeddings.js` is the single place that decides the
+canonical spelling, and every write goes through it.
+
+The convention is enforced where a person *chooses* a model, so nothing new enters the
+system without a platform segment. Reads stay tolerant, because a database written before
+that was enforced may hold a bare name and its chunks must keep working.
 
 ## Secrets
 

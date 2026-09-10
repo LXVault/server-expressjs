@@ -18,7 +18,44 @@ const DEFAULT_EMBEDDING_MODEL = 'openai/text-embedding-3-small';
 const MODEL_ID_RE = /^[A-Za-z0-9._/:-]{1,100}$/;
 
 function isValidModelId(model) {
-  return typeof model === 'string' && MODEL_ID_RE.test(model);
+  return typeof model === 'string' && MODEL_ID_RE.test(model.trim());
+}
+
+/**
+ * Canonical spelling of a stored model identifier: trimmed and lower-cased.
+ *
+ * Every write to a `model_name` column goes through this, so one model can
+ * never exist under two spellings. Normalising on the way in is what makes the
+ * (chunk_id, model_name) primary key mean "one vector per model" rather than
+ * "one vector per way of typing the model".
+ *
+ * @param {*} model
+ * @returns {string|null} The canonical name, or null if the shape is unusable.
+ */
+function normalizeModelName(model) {
+  if (typeof model !== 'string') return null;
+  const canonical = model.trim().toLowerCase();
+  if (!canonical || !MODEL_ID_RE.test(canonical)) return null;
+  return canonical;
+}
+
+/**
+ * Whether a model id follows the {platform}/{model} convention: exactly one
+ * slash, with a non-empty segment either side.
+ *
+ * Enforced when a person CHOOSES a model, so nothing new enters the system
+ * without a platform segment. Reads stay tolerant, because a database written
+ * before this was enforced may hold a bare name and its chunks must keep
+ * working.
+ *
+ * @param {*} model
+ * @returns {boolean}
+ */
+function isConventionalModelId(model) {
+  const canonical = normalizeModelName(model);
+  if (!canonical) return false;
+  const segments = canonical.split('/');
+  return segments.length === 2 && Boolean(segments[0]) && Boolean(segments[1]);
 }
 
 /**
@@ -95,6 +132,8 @@ module.exports = {
   EMBEDDING_MODELS,
   DEFAULT_EMBEDDING_MODEL,
   isValidModelId,
+  isConventionalModelId,
+  normalizeModelName,
   embedText,
   toVectorLiteral,
 };
