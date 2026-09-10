@@ -6,7 +6,7 @@
 // entry points behave identically.
 
 const { pool } = require('../config/db');
-const { embedText, toVectorLiteral } = require('./embeddings');
+const { embedText, toVectorLiteral, normalizeModelName } = require('./embeddings');
 
 // Only these file types may be ingested into a project's knowledge base.
 const ALLOWED_EXTENSIONS = ['.md', '.txt', '.pdf'];
@@ -140,12 +140,21 @@ async function ingestFile({ projectId, userId, apiKey, model, filename, buffer }
     throw err;
   }
 
+  // Canonical spelling for the model_name column, decided once and used for
+  // every row this ingestion writes.
+  const modelName = normalizeModelName(model);
+  if (!modelName) {
+    const err = new Error(`Invalid embedding model id: ${model}`);
+    err.status = 400;
+    throw err;
+  }
+
   // Embed every chunk up front (network) before opening the transaction, so we
   // don't hold a DB connection open across slow OpenRouter calls.
   const vectors = [];
   for (const piece of chunks) {
     // eslint-disable-next-line no-await-in-loop
-    vectors.push(await embedText({ apiKey, model, input: piece }));
+    vectors.push(await embedText({ apiKey, model: modelName, input: piece }));
   }
 
   const client = await pool.connect();
@@ -167,13 +176,24 @@ async function ingestFile({ projectId, userId, apiKey, model, filename, buffer }
     );
     let nextIndex = idxRes.rows[0].next;
 
+    // Content and vector are two rows now. The chunk is the durable record; the
+    // embedding is one model's view of it, and a later model adds a row here
+    // rather than replacing anything.
     for (let i = 0; i < chunks.length; i += 1) {
       // eslint-disable-next-line no-await-in-loop
+      const chunkRes = await client.query(
+        `INSERT INTO document_chunks (document_id, file_id, content, chunk_index)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [projectId, file.id, chunks[i], nextIndex]
+      );
+
+      // eslint-disable-next-line no-await-in-loop
       await client.query(
-        `INSERT INTO document_chunks
-           (document_id, file_id, content, chunk_index, embedding, embedding_model)
-         VALUES ($1, $2, $3, $4, $5::vector, $6)`,
-        [projectId, file.id, chunks[i], nextIndex, toVectorLiteral(vectors[i]), model]
+        `INSERT INTO document_chunk_embeddings (chunk_id, model_name, embedding, dimensions)
+         VALUES ($1, $2, $3::vector, $4)
+         ON CONFLICT (chunk_id, model_name) DO NOTHING`,
+        [chunkRes.rows[0].id, modelName, toVectorLiteral(vectors[i]), vectors[i].length]
       );
       nextIndex += 1;
     }

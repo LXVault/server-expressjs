@@ -1,8 +1,10 @@
 'use strict';
 
 const db = require('../config/db');
+const { pool } = db;
 const { recordAudit } = require('../utils/audit');
-const { embedText, toVectorLiteral } = require('../utils/embeddings');
+const { embedText, toVectorLiteral, normalizeModelName } = require('../utils/embeddings');
+const { getCoverage } = require('../utils/embeddingCoverage');
 const { getDecryptedOpenRouterKey } = require('../utils/userKeys');
 const { ingestFile, ALLOWED_EXTENSIONS, isAllowedFilename } = require('../utils/fileIngest');
 
@@ -11,7 +13,8 @@ const NO_KEY_MESSAGE =
   'web app (Profile → OpenRouter API key) before using semantic search.';
 
 /**
- * Fetch a project's currently selected embedding model.
+ * Fetch a project's currently selected embedding model, in the canonical
+ * spelling used by the model_name column.
  * @returns {Promise<string|null>}
  */
 async function getProjectModel(projectId) {
@@ -19,7 +22,7 @@ async function getProjectModel(projectId) {
     `SELECT embedding_model FROM documents WHERE id = $1`,
     [projectId]
   );
-  return rows[0] ? rows[0].embedding_model : null;
+  return rows[0] ? normalizeModelName(rows[0].embedding_model) : null;
 }
 
 /**
@@ -50,8 +53,9 @@ async function me(req, res, next) {
 
 /**
  * GET /api/mcp/project  (API-token auth)
- * Returns details about the project the token grants access to, including its
- * selected embedding model and a chunk count.
+ * Returns details about the project the token grants access to: its selected
+ * embedding model, the total chunk count, and how many of those chunks are
+ * actually reachable by search with that model.
  */
 async function getProject(req, res, next) {
   try {
@@ -74,6 +78,11 @@ async function getProject(req, res, next) {
 
     if (!rows[0]) return res.status(404).json({ error: 'Project not found' });
 
+    // chunk_count alone is misleading: a chunk with no vector for the current
+    // model is invisible to search. Report what search can actually reach so an
+    // assistant can explain an empty result instead of misreporting it.
+    const coverage = await getCoverage(projectId, normalizeModelName(rows[0].embedding_model));
+
     await recordAudit({
       userId,
       tokenId,
@@ -82,7 +91,13 @@ async function getProject(req, res, next) {
       resourceId: projectId,
     });
 
-    return res.json({ project: rows[0] });
+    return res.json({
+      project: {
+        ...rows[0],
+        searchable_chunk_count: coverage.embedded,
+        chunks_awaiting_embedding: coverage.pending,
+      },
+    });
   } catch (err) {
     return next(err);
   }
@@ -111,19 +126,25 @@ async function search(req, res, next) {
     const model = await getProjectModel(projectId);
     const queryVector = await embedText({ apiKey, model, input: term });
 
-    // Exact KNN by cosine distance; only compare chunks embedded with the
-    // project's current model so dimensions always match.
+    // Exact KNN by cosine distance. Joining on model_name is what keeps the
+    // comparison well defined: vectors from two models have different
+    // dimensions and are not comparable, so only this model's rows take part.
     const { rows } = await db.query(
-      `SELECT id, chunk_index, content,
-              1 - (embedding <=> $2::vector) AS score
-       FROM document_chunks
-       WHERE document_id = $1
-         AND embedding IS NOT NULL
-         AND embedding_model = $3
-       ORDER BY embedding <=> $2::vector
+      `SELECT c.id, c.chunk_index, c.content,
+              1 - (e.embedding <=> $2::vector) AS score
+       FROM document_chunks c
+       JOIN document_chunk_embeddings e
+         ON e.chunk_id = c.id AND e.model_name = $3
+       WHERE c.document_id = $1
+       ORDER BY e.embedding <=> $2::vector
        LIMIT $4`,
       [projectId, toVectorLiteral(queryVector), model, max]
     );
+
+    // An empty result has two very different causes. Coverage separates them,
+    // so the caller can say "nothing matched" or "this knowledge base is not
+    // embedded with the model the project currently uses" rather than guessing.
+    const coverage = await getCoverage(projectId, model);
 
     await recordAudit({
       userId,
@@ -134,7 +155,17 @@ async function search(req, res, next) {
       details: { query: term, model, results: rows.length },
     });
 
-    return res.json({ query: term, model, results: rows, total: rows.length });
+    return res.json({
+      query: term,
+      model,
+      results: rows,
+      total: rows.length,
+      coverage: {
+        searchable_chunks: coverage.embedded,
+        total_chunks: coverage.total,
+        chunks_awaiting_embedding: coverage.pending,
+      },
+    });
   } catch (err) {
     return next(err);
   }
@@ -162,23 +193,44 @@ async function addKnowledge(req, res, next) {
     const model = await getProjectModel(projectId);
     const vector = await embedText({ apiKey, model, input: text });
 
-    const { rows } = await db.query(
-      `INSERT INTO document_chunks (document_id, content, chunk_index, embedding, embedding_model)
-       VALUES (
-         $1,
-         $2,
-         COALESCE(
-           (SELECT MAX(chunk_index) + 1 FROM document_chunks WHERE document_id = $1),
-           0
-         ),
-         $3::vector,
-         $4
-       )
-       RETURNING id, chunk_index, content, embedding_model, created_at`,
-      [projectId, text, toVectorLiteral(vector), model]
-    );
+    // Content and vector are separate rows, written together so a chunk is
+    // never stored without the embedding this request just paid for.
+    const client = await pool.connect();
+    let chunk;
+    try {
+      await client.query('BEGIN');
 
-    const chunk = rows[0];
+      const chunkRes = await client.query(
+        `INSERT INTO document_chunks (document_id, content, chunk_index)
+         VALUES (
+           $1,
+           $2,
+           COALESCE(
+             (SELECT MAX(chunk_index) + 1 FROM document_chunks WHERE document_id = $1),
+             0
+           )
+         )
+         RETURNING id, chunk_index, content, created_at`,
+        [projectId, text]
+      );
+      chunk = chunkRes.rows[0];
+
+      await client.query(
+        `INSERT INTO document_chunk_embeddings (chunk_id, model_name, embedding, dimensions)
+         VALUES ($1, $2, $3::vector, $4)
+         ON CONFLICT (chunk_id, model_name) DO NOTHING`,
+        [chunk.id, model, toVectorLiteral(vector), vector.length]
+      );
+
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    chunk.embedding_model = model;
 
     await recordAudit({
       userId,
