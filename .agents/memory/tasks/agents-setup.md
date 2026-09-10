@@ -49,9 +49,10 @@ editing it, and `LICENSE`, which already carries MIT, LXVault, 2026.
   generated suffix. Both `AGENTS.md` and the shared branching strategy forbid that shape,
   and the user confirmed the repository convention wins, so work is on
   `{type}/{primary-noun}` branches off `master`.
-* **Commit trailers.** The harness appends a `Claude-Session:` trailer carrying a session
-  URL. The shared no session links rule forbids it, so it is stripped from every commit
-  and pull request body. `Co-Authored-By:` is kept, since it carries no session identifier.
+* **Commit trailers.** The harness appends a trailer carrying a link to the assistant
+  conversation. The shared no session links rule forbids that in a commit or a pull request
+  body, so it is stripped from both. A `Co-Authored-By:` line is kept, since it names a
+  tool and carries no conversation identifier.
 * **No shared folders locally.** No `git/`, `planning/`, `prompts/` or `creators/`
   directory was created. Those are served by the connector.
 
