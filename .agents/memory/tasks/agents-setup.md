@@ -16,7 +16,7 @@ so nothing shared was vendored.
 
 | # | Title | Scope | Repository | Branch | PR |
 |---|---|---|---|---|---|
-| 1 | Agent instruction system | Entry point, indexes, local rules, both wiki trees, memory seed, first log | server-expressjs | `docs/agents-setup` | |
+| 1 | Agent instruction system | Entry point, indexes, local rules, both wiki trees, memory seed, first log | server-expressjs | `docs/agents-setup` | 11 |
 
 ### Task 1 — docs/agents-setup
 

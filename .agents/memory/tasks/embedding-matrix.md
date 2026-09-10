@@ -24,9 +24,9 @@ stay safe to re-run on every boot.
 
 | # | Title | Scope | Repository | Branch | PR |
 |---|---|---|---|---|---|
-| 1 | Schema split, migration, coverage and backfill | The table, the migration, search, ingestion, the API | server-expressjs | `feat/embedding-matrix` | |
-| 2 | Coverage and backfill in the web app | The embedding model card and its API methods | client-reactjs | `feat/embedding-matrix` | |
-| 3 | Tool descriptions that explain coverage | `get_project` and `search_knowledge` wording, the tool reference | mcp | `feat/embedding-matrix` | |
+| 1 | Schema split, migration, coverage and backfill | The table, the migration, search, ingestion, the API | server-expressjs | `feat/embedding-matrix` | 12 |
+| 2 | Coverage and backfill in the web app | The embedding model card and its API methods | client-reactjs | `feat/embedding-matrix` | 9 |
+| 3 | Tool descriptions that explain coverage | `get_project` and `search_knowledge` wording, the tool reference | mcp | `feat/embedding-matrix` | 7 |
 
 Task 1 lands first: the other two read what it returns.
 
@@ -78,3 +78,10 @@ Depends on: nothing. Task 2 and task 3 depend on the API shape above.
   why removing them is a separate deliberate call.
 * **Model name convention enforced at the choice, not on read.** A database written before
   the convention may hold a bare name, and its chunks must keep working.
+
+## Status
+
+Done. Every branch is pushed and every pull request is open, each stating the pull
+request it merges after. Merging is the user's call and has not been requested.
+
+Record closed.
