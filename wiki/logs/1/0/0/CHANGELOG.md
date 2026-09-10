@@ -23,3 +23,12 @@ The backend as it stands, plus the agent instruction, knowledge and memory syste
   set through the `lxagents-agents-base` connector, `.agents/` with indexes, local rules,
   agent knowledge and memory, and this `wiki/` tree.
 * `README.md`, which the repository previously did not have.
+
+## Changed
+
+* `SKILLS.md` moved from the repository root to `.agents/skills/universal.md`, and the
+  folder was registered in the agents index. Only `AGENTS.md`, `README.md` and `LICENSE`
+  belong at the root, and `skills/` is an instruction folder like any other. Its body was
+  filled in, since the original carried frontmatter with no title.
+* `CLAUDE.md` moved to `.claude/CLAUDE.md`, which Claude Code treats as an equivalent
+  project instruction location, so nothing about how it loads changes.

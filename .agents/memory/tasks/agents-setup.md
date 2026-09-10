@@ -38,8 +38,20 @@ Created:
 * `wiki/logs/1/0/0/CHANGELOG.md`, the first log entry.
 * `README.md`, which this repository did not have.
 
-Left alone: `SKILLS.md`, because the repository's own rules require user approval before
-editing it, and `LICENSE`, which already carries MIT, LXVault, 2026.
+Moved out of the repository root, on the user's instruction:
+
+* `SKILLS.md` to `.agents/skills/universal.md`, and the folder registered in
+  `.agents/index/agents-index.md`. The directory mandate permits only `AGENTS.md`,
+  `README.md` and `LICENSE` at the root, and `skills/` is a listed instruction folder, so
+  the root file was a standing exception with nothing to justify it. The body was filled
+  in, since the original was frontmatter with no `#` title and the set's format requires
+  one.
+* `CLAUDE.md` to `.claude/CLAUDE.md`. Claude Code documents `./CLAUDE.md` and
+  `./.claude/CLAUDE.md` as equivalent project instruction locations, so this is a move
+  rather than a change in behaviour. Verified against the memory documentation before
+  moving it, since a wrong guess would have silently stopped the file loading.
+
+Left alone: `LICENSE`, which already carries MIT, LXVault, 2026.
 
 ## Decisions
 
