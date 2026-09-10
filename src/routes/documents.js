@@ -25,6 +25,8 @@ const {
 const {
   getEmbeddingModel,
   setEmbeddingModel,
+  backfillEmbeddings,
+  deleteModelEmbeddings,
 } = require('../controllers/projectModelController');
 const { MAX_FILE_BYTES, ALLOWED_EXTENSIONS, extOf } = require('../utils/fileIngest');
 
@@ -81,7 +83,16 @@ router.post('/:id/token', generateProjectToken);
 router.delete('/:id/token', revokeProjectToken);
 
 // Per-project embedding model (read for members; change for owner/admin).
+// Changing the model never deletes a vector, so the read reports coverage and
+// the two routes below are the only ways to add or remove one.
 router.get('/:id/embedding-model', getEmbeddingModel);
 router.put('/:id/embedding-model', setEmbeddingModel);
+
+// Embed the chunks missing a vector for the current model, and reclaim the
+// space held by a model the project no longer uses. Owner/admin only, enforced
+// in the controller. The model segment is a provider-namespaced id, so it
+// contains a slash and needs the wildcard to survive routing.
+router.post('/:id/embeddings/backfill', backfillEmbeddings);
+router.delete('/:id/embeddings/:model(*)', deleteModelEmbeddings);
 
 module.exports = router;
