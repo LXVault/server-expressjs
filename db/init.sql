@@ -52,15 +52,13 @@ CREATE TABLE IF NOT EXISTS document_members (
     PRIMARY KEY (document_id, user_id)
 );
 
+-- Chunk CONTENT only. The vectors live in document_chunk_embeddings, one row
+-- per model, so a chunk can be embedded by several models at once and changing
+-- a project's model never invalidates what is already stored.
 CREATE TABLE IF NOT EXISTS document_chunks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     content TEXT NOT NULL,
-    -- Dimensionless `vector` so projects can pick embedding models of different
-    -- sizes. `embedding_model` records which model produced this vector; search
-    -- only compares chunks embedded with the project's current model (same dim).
-    embedding vector,
-    embedding_model VARCHAR(100),
     chunk_index INTEGER NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -79,9 +77,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_document_chunks_doc_id ON document_chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_token_id ON audit_logs(token_id);
--- NOTE: no HNSW/ivfflat index on `embedding` — the column is dimensionless to
--- allow per-project model choice, and pgvector ANN indexes require a fixed
--- dimension. Search uses exact KNN (`<=>`), which is fine at this scale.
+-- NOTE: no HNSW/ivfflat index on document_chunk_embeddings.embedding. The
+-- column is dimensionless so one project can hold vectors from models of
+-- different sizes, and pgvector ANN indexes require a fixed dimension. Search
+-- uses exact KNN (`<=>`), which is fine at this scale.
 
 -- ---------------------------------------------------------------------------
 -- Per-project token wiring (runs after `documents` exists).
@@ -114,16 +113,78 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_project_id ON api_tokens(project_id);
 -- Semantic search wiring (idempotent for pre-existing databases).
 -- ---------------------------------------------------------------------------
 
--- Per-project embedding model + per-chunk provenance.
+-- The project's SELECTED embedding model. Only this column records a choice;
+-- everything already embedded stays queryable whatever it is set to.
 ALTER TABLE documents
     ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(100)
     NOT NULL DEFAULT 'openai/text-embedding-3-small';
-ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(100);
 
--- Relax the embedding column to a dimensionless vector so projects can choose
--- models of differing sizes. Drop the dimension-specific ANN index first.
+-- Drop the dimension-specific ANN index left by older databases.
 DROP INDEX IF EXISTS idx_document_chunks_embedding;
-ALTER TABLE document_chunks ALTER COLUMN embedding TYPE vector;
+
+-- ---------------------------------------------------------------------------
+-- One embedding per (chunk, model).
+-- ---------------------------------------------------------------------------
+-- A chunk's text and its vector are different facts with different lifetimes:
+-- the text is written once, while a vector exists per embedding model and a
+-- project may change model at any time. Keeping them in one row meant a chunk
+-- could hold exactly one model's vector, so switching model made the whole
+-- knowledge base unsearchable until it was deleted and re-uploaded.
+--
+-- Splitting them makes a model change additive. Vectors for the previous model
+-- stay, switching back is instant, and the only cost of a new model is
+-- embedding the chunks that do not have a row for it yet.
+--
+-- `embedding` is dimensionless because two models produce different sizes, and
+-- rows for both can sit in this table at once. `model_name` follows the shared
+-- {platform}/{model} convention and is lowercased before every write, so one
+-- model has exactly one spelling here.
+CREATE TABLE IF NOT EXISTS document_chunk_embeddings (
+    chunk_id UUID NOT NULL REFERENCES document_chunks(id) ON DELETE CASCADE,
+    model_name VARCHAR(100) NOT NULL,
+    embedding vector NOT NULL,
+    dimensions INTEGER,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (chunk_id, model_name)
+);
+
+-- Search always filters by model, and the backfill counts by it.
+CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_model
+    ON document_chunk_embeddings(model_name);
+
+-- Move an older database's single vector per chunk into the table above, then
+-- drop the columns it came from. Guarded on the column still existing, so this
+-- runs exactly once and is a no-op on every later boot and on a fresh database.
+DO $$
+BEGIN
+    -- Both columns are needed to attribute a vector to a model. They were always
+    -- created together, so this is the only shape worth migrating; the drops
+    -- below are guarded separately so a half-migrated database still converges.
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'document_chunks' AND column_name = 'embedding'
+    ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'document_chunks' AND column_name = 'embedding_model'
+    ) THEN
+        INSERT INTO document_chunk_embeddings (chunk_id, model_name, embedding)
+        SELECT id, lower(btrim(embedding_model)), embedding
+          FROM document_chunks
+         WHERE embedding IS NOT NULL
+           AND embedding_model IS NOT NULL
+           AND btrim(embedding_model) <> ''
+        ON CONFLICT (chunk_id, model_name) DO NOTHING;
+    END IF;
+END $$;
+
+ALTER TABLE document_chunks DROP COLUMN IF EXISTS embedding;
+ALTER TABLE document_chunks DROP COLUMN IF EXISTS embedding_model;
+
+-- Lowercase any model name an older database wrote before the convention was
+-- enforced at the write, so one model cannot exist under two spellings.
+UPDATE documents
+   SET embedding_model = lower(btrim(embedding_model))
+ WHERE embedding_model <> lower(btrim(embedding_model));
 
 -- Per-user OpenRouter API key, encrypted at rest (AES-256-GCM).
 -- One row per user; the secret lives in its own table, isolated from `users`.
@@ -145,8 +206,9 @@ CREATE TABLE IF NOT EXISTS user_openrouter_keys (
 -- A project's knowledge base can be populated by uploading source files
 -- (.md / .txt / .pdf). Each uploaded file is recorded here as a single row —
 -- the "central index" of what a project was built from — while its extracted
--- text is split into many `document_chunks` (one embedding per chunk) for
--- semantic search. Deleting a file row cascades to all of its chunks.
+-- text is split into many `document_chunks` for semantic search, each of which
+-- carries one vector per embedding model. Deleting a file row cascades to its
+-- chunks, and those cascade to their vectors.
 CREATE TABLE IF NOT EXISTS document_files (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
