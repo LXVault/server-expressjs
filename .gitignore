@@ -14,7 +14,10 @@ build/
 docker-compose.yml
 
 # Logs
+# Runtime log directories only. wiki/logs/ is the versioned changelog tree and
+# must stay tracked.
 logs/
+!wiki/logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
