@@ -99,12 +99,24 @@ exercise the route you changed. Report it that way; do not imply a suite ran.
   call each. `MAX_CHUNKS_PER_FILE` in `fileIngest.js` is the check that matters, and it
   must stay *before* the embedding loop — that ordering is the whole point.
 * **`TRUST_PROXY` is a number, never `true`.** It decides whether `X-Forwarded-For` is
-  believed, and anything limiting requests per IP rests on `req.ip` being the client.
-  `true` trusts the last hop, which is the caller. Unset is the safe default; a positive
-  integer is the count of proxies in front of the app.
+  believed, and every rate limit in the app rests on `req.ip` being the client. `true`
+  trusts the last hop, which is the caller, and is rejected outright in `config/env.js`.
+  The default is `1`, which is right for the deployed app behind Render; set it to `0` or
+  empty for `npm run dev` straight against the app, or to `2` behind your own nginx.
 * **A multer limit is a `413`, not a `400`.** `LIMIT_STATUS` in `src/routes/documents.js`
   maps each `LIMIT_*` code to the status it deserves. Adding a limit without a row there
   silently degrades it to 400.
+* **Limiter order in `src/routes/index.js` is load-bearing.** A `use` that matches ends the
+  walk down that router, so `/auth` and `/mcp` are mounted *above* `router.use(apiLimiter)`
+  and carry their own budgets. Move `apiLimiter` to the top and the 60/min general cap
+  applies to a 10/15min sign-in limiter and a 120/min MCP surface alike, which both
+  breaks the intent and leaves the tighter budget unenforceable. The four limiters live in
+  `src/middleware/rateLimit.js`; the budgets are in
+  [`../../../wiki/information/architecture.md`](../../../wiki/information/architecture.md).
+* **Login rate limiting counts failures, not attempts.** `skipSuccessfulRequests` is on for
+  the sign-in limiter, so a correct password spends no budget. Turning it off locks out
+  anyone who signs in more than ten times correctly in a quarter hour, which includes every
+  user of a shared machine.
 
 ## Where things get documented
 

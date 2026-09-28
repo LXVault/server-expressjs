@@ -18,6 +18,10 @@ const PUBLISHED_DEFAULTS = {
   DATABASE_URL: 'postgresql://mcp_user:mcp_password@localhost:5432/mcp_rag',
 };
 
+// Proxies in front of this process when TRUST_PROXY is not set. See the note
+// beside `trustProxy` in the config object below.
+const DEFAULT_TRUST_PROXY_HOPS = 1;
+
 /**
  * Refuse to start a production process that is running on published values.
  *
@@ -82,15 +86,24 @@ const config = {
   corsOrigin: process.env.CORS_ORIGIN || '*',
 
   // How many proxies sit in front of this process, for the purpose of trusting
-  // `X-Forwarded-For`. `null` means "do not set it at all", which is the default
-  // and the safe one: without it `req.ip` is the connecting peer, so a limiter
-  // keyed on IP cannot be walked around with a forged header. Set it to a
-  // number only when a proxy you control overwrites that header on the way in.
-  // `true` (trust the whole chain) is deliberately not supported — it means
-  // trusting whatever the last hop wrote, which is the client.
+  // `X-Forwarded-For`. Anything that limits requests per IP rests on `req.ip`
+  // being the client rather than the proxy.
+  //
+  // The default is 1 because this app is deployed behind exactly one hop (Render
+  // terminates TLS and forwards). Left unset, every caller in production shares a
+  // single bucket and one noisy client exhausts the budget for everyone.
+  //
+  // Set `TRUST_PROXY=` (or 0) when running `npm run dev` against the app
+  // directly, where there is no proxy and a forged header is the only way to
+  // influence the key.
+  //
+  // `true` is deliberately not supported. It trusts the whole chain, which means
+  // trusting whatever the last hop wrote, and the last hop is the client — that
+  // hands anyone a working bypass of every per-IP limit by editing a header.
+  // Add a proxy in front of Render and this must go to 2.
   trustProxy: (() => {
     const raw = (process.env.TRUST_PROXY || '').trim();
-    if (!raw) return null;
+    if (!raw) return DEFAULT_TRUST_PROXY_HOPS;
     const hops = parseInt(raw, 10);
     return Number.isFinite(hops) && hops > 0 ? hops : null;
   })(),

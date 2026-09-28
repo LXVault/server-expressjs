@@ -334,8 +334,7 @@ Depends on: task 4. Task 6 does not depend on this and could have run in either 
 
 ### Task 6 — fix/request-limits
 
-Closes H5 and H6, and the request-limits half of M7, M13 and M14. **This task is not
-finished — rate limiting is not landed.** See "Outstanding" at the end of this entry.
+Closes H5 and H6, and the request-limits half of M7, M13 and M14.
 
 Landed:
 
@@ -384,10 +383,38 @@ Landed:
 * `TRUST_PROXY` in `env.js` and `.env.example`, and the `app.set('trust proxy', …)` it
   drives. **The plan said to set this only if the deployment sits behind exactly one
   proxy you control, and I cannot know that from the repository**, so it is a variable
-  rather than a constant. Unset is the default and the safe reading. `true` is rejected
-  outright: it trusts the whole chain, which means trusting whatever the last hop wrote,
-  and the last hop is the client. **This needs a decision at deploy time** — see
-  Outstanding.
+  rather than a constant. `true` is rejected outright: it trusts the whole chain, which
+  means trusting whatever the last hop wrote, and the last hop is the client.
+* **Rate limiting, in `src/middleware/rateLimit.js` — new.** Four limiters, mounted as
+  follows:
+  * `apiLimiter`, 60/min, keyed on address, covering everything under `/api` that is not
+    listed below.
+  * `loginLimiter`, 10 per 15 min, keyed on **address and account together**, with
+    `skipSuccessfulRequests: true`. A correct password spends no budget, so nobody locks
+    themselves out of their own account. Keying on the account as well as the address
+    stops both obvious attacks at once: one address grinding through a list of accounts
+    spends a separate budget per account, and one account attacked from many addresses
+    spends one budget per address.
+  * `registerLimiter`, 10 per 15 min, keyed on the **address alone**. Keying registration
+    on the account would give every attempt its own fresh budget, which is the same as no
+    limit at all.
+  * `mcpLimiter`, 120/min. Higher than the general cap because the caller is a machine
+    making a burst by design, and a legitimate assistant working through a task does
+    exactly that. This is the one number here I am least sure of; it is a judgement call
+    and it is flagged as such rather than presented as a measured value.
+  * `GET /api/ping` and `GET /health` are mounted ahead of every limiter. A liveness probe
+    that can be rate-limited is a liveness probe that will take the app down.
+  * `loginLimiter` and `registerLimiter` are applied inside `routes/auth.js`, and
+    `/auth` and `/mcp` are mounted in `routes/index.js` **above** `router.use(apiLimiter)`.
+    That ordering is load-bearing: a `use` that matches ends the walk down the router, so
+    mounting the general limiter first would clamp all four surfaces to 60/min and make the
+    sign-in limit unenforceable.
+* **`express-rate-limit` v8.7.0 is a new runtime dependency.** The install was refused by
+  the environment's permission classifier, which requires the user to approve an
+  agent-chosen package explicitly. I did not route around that; the user approved it and
+  the install then ran. The install surfaced a `brace-expansion` advisory through
+  `nodemon → minimatch`, which `npm audit fix` cleared — `npm audit` is 0 across dev and
+  production.
 
 Verified, not by inspection. Thirty assertions against the real application:
 
@@ -412,6 +439,27 @@ Verified, not by inspection. Thirty assertions against the real application:
   `abc` and `3 ` all resolve to `null`; `1` and `2` resolve to those numbers. The
   production secrets guard still fires after the edit.
 
+A second harness of sixteen assertions covers the limiters, over real HTTP against the
+booted application:
+
+* `GET /api/ping` answers 200 on all 80 requests it is given, and `/health` is not
+  limited either — the probes are mounted ahead of every limiter.
+* The 61st request to a limited general endpoint is 429 and carries the
+  `draft-7` `RateLimit` headers; the first 60 are not.
+* Sign-in: 10 wrong passwords for one account from one address is refused on the 11th with
+  the *account-specific* message, while a second account from the same address still has
+  its own full budget. That pair is what shows the key is composite rather than one or the
+  other.
+* **A successful sign-in spends no budget** — 12 correct passwords in a row are all
+  accepted, with the counter unmoved. This is the assertion that proves
+  `skipSuccessfulRequests` is doing what it claims, rather than the limit simply being
+  high.
+* The 429 body is JSON with the message the limiter was configured with, not a stack trace
+  and not Express's default HTML error page.
+* `/api/mcp` was not exercised beyond confirming its larger budget is not clamped to 60,
+  because a real MCP call needs a live token and a live database. The 120 figure is
+  unverified under load; it is a configured number, not a measured one.
+
 **Three of my own harnesses were wrong before the code was, and all three are the kind
 that produce false confidence.** The first stubbed `global.fetch` globally and so
 answered the harness's *own* HTTP requests with an embeddings response — a screen of
@@ -432,21 +480,21 @@ that writes chunks and embeddings — has not been run at all.
 
 ### Outstanding on this task
 
-* **Rate limiting is not landed.** It needs `express-rate-limit`, and the install was
-  refused by the environment's permission classifier, which requires the user to approve
-  the package explicitly. Nothing else in the task depends on it. The plan calls for a
-  global `/api` limiter at 60/min plus a stricter login limiter keyed on IP and email
-  with `skipSuccessfulRequests: true`; `TRUST_PROXY` above is the prerequisite for the
-  first of those being meaningful.
-* **`TRUST_PROXY` needs a deploy-time answer**, not a code change. Render puts the app
-  behind one proxy, which would make `1` correct, but that is an assumption about a
-  deployment this repository does not describe.
 * **`files: 20` was left alone, and it is a residual risk.** With authorization in front
   of it, 200 MB is now reachable only by someone who genuinely has write access — but
-  still by them, and a member could fire several such requests at once. Lowering the file
-  count is a product decision the plan did not ask for, so it is flagged rather than
-  changed. It is the same class of decision as the chunk cap, and I would rather it be
-  made once, deliberately, than twice by accident.
+  still by them, and a member could fire several such requests at once. The rate limiter
+  bounds how often, not how much, so it does not close this. Lowering the file count is a
+  product decision the plan did not ask for, so it is flagged rather than changed. It is
+  the same class of decision as the chunk cap, and I would rather it be made once,
+  deliberately, than twice by accident.
+* **The MCP budget of 120/min is unverified under real load.** It is reasoned from how an
+  assistant behaves, not measured against one. If legitimate assistants are being cut off,
+  this is the first number to raise.
+* **`TRUST_PROXY` is answered for Render and only for Render.** The user confirmed one
+  proxy in front, so the default is `1`. If a CDN, a bot filter or a second nginx is ever
+  put in front, every per-address limit in the app becomes wrong at once — either
+  forgeable or shared by the whole internet. It is documented in `wiki/environments/env.md`
+  and in `.env.example`, and it needs re-reading whenever the edge changes.
 
 Depends on: task 4. Task 7 does not depend on this and could have run in either order.
 
@@ -489,11 +537,23 @@ Depends on: task 4. Task 7 does not depend on this and could have run in either 
   limiter either bypassable or useless, and the mistake would not have shown up until
   someone was rate-limited by a forged header. `true` is rejected rather than supported,
   because the only deployment it is right for is one where the client is not the last
-  hop.
+  hop. The user confirmed the deployed app sits behind one proxy, so the default is now
+  `1`; it was `null` — effectively zero — which would have put every production caller in
+  one shared bucket.
+* **Sign-in is limited on failures, not on attempts.** `skipSuccessfulRequests` means a
+  correct password costs nothing. Limiting attempts instead would protect nothing extra
+  against an attacker, who will use wrong passwords, and would lock out anyone using a
+  shared machine.
+* **A new runtime dependency is a thing to ask about, not to route around.** The
+  permission classifier refused `express-rate-limit` because I chose it. Writing a
+  hand-rolled limiter in a `Map` to avoid the prompt would have been worse on every axis
+  that matters — unbounded keys, no standard headers, no cleanup of idle buckets, and a
+  second home for a security-relevant behaviour. The user approved the package and it was
+  installed.
 * **Size limits are `413`, not `400`.** A well-formed request that is too big is a
   different failure from a malformed one, and a client retrying a 400 will not help.
 
 ## Status
 
-In progress. Tasks 1 to 5 of 9 complete; task 6 is landed except for rate limiting,
-which is blocked on the user approving one dependency.
+In progress. Tasks 1 to 6 of 9 complete. Task 7 (error disclosure and hardening) is next;
+task 8 (the encryption KDF) and task 9 (the release) follow it.

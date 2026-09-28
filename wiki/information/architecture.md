@@ -56,6 +56,31 @@ project has already made the process allocate the whole upload by the time it is
 refused. `src/middleware/documentAccess.js` does the check and hands the result to the
 controller, so the query runs once.
 
+## Rate limits
+
+Size limits bound one request; rate limits bound how often. A caller can send sixty empty
+requests a minute forever without meeting a single byte limit.
+
+| Surface | Budget | Key | Notes |
+|---|---|---|---|
+| `/api` generally | 60 / min | address | Everything not listed below. |
+| `POST /api/auth/login` | 10 / 15 min | address **and** account | Failures only. A correct password spends no budget, so nobody locks themselves out. |
+| `POST /api/auth/register` | 10 / 15 min | address | Keyed on the address alone — the account is what is being created, so keying on it would give every attempt its own budget. |
+| `/api/mcp/*` | 120 / min | address | Higher because the caller is a machine making a burst by design. A judgement call, and the number here to revisit first if legitimate assistants get cut off. |
+| `GET /api/ping`, `GET /health` | none | — | Liveness probes must not be able to exhaust anything. |
+
+Keying sign-in on the account as well as the address stops both obvious attacks at once: one
+address grinding through a list of accounts spends a separate budget per account, and one
+account under attack from many addresses spends one budget per address.
+
+The auth and MCP routers are mounted **ahead** of the general limiter in
+`src/routes/index.js`, because a `use` that matches ends the walk down that router. That
+ordering is what lets the tighter and the larger budgets apply to their own surfaces instead
+of both being clamped to 60.
+
+Every one of these rests on `TRUST_PROXY` being right, since it decides whether `req.ip` is
+the client or the proxy. See [env.md](../environments/env.md).
+
 ## Authentication
 
 Two independent paths, never mixed.

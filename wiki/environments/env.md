@@ -25,7 +25,7 @@ the likelier mistake and produces the same failure.
 | `ENCRYPTION_KEY` | `default_encryption_key_change_me_in_production` | Run through SHA-256 to derive the AES-256-GCM key that encrypts users' OpenRouter keys. **Required in production.** Rotating it makes every stored key undecryptable. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Base URL for the OpenAI compatible embeddings endpoint. |
 | `CORS_ORIGIN` | `*` | Either `*` to reflect any origin, or a comma separated allow list. Trailing slashes are stripped before comparison, so `https://app.com/` and `https://app.com` both match. |
-| `TRUST_PROXY` | unset | How many proxies sit in front of the process, so `req.ip` is the client rather than the proxy. A number only; `true` is rejected on purpose. See below. |
+| `TRUST_PROXY` | `1` | How many proxies sit in front of the process, so `req.ip` is the client rather than the proxy. A number only; `true` is rejected on purpose. Set it to `0` or leave it empty to run against the app directly. |
 | `AUTO_MIGRATE` | unset | Set to the string `false` to stop `db/init.sql` being applied on boot. Any other value, including unset, applies it. |
 | `PG_POOL_MAX` | `10` | Maximum pooled connections. Read directly in `src/config/db.js`. |
 | `PG_IDLE_TIMEOUT` | `30000` | Idle client timeout in milliseconds. Read directly in `src/config/db.js`. |
@@ -33,20 +33,20 @@ the likelier mistake and produces the same failure.
 ## Notes
 
 **`TRUST_PROXY` is the setting most easily got wrong.** It controls whether Express
-believes `X-Forwarded-For`, and anything that limits requests per IP depends on
-`req.ip` being the client.
+believes `X-Forwarded-For`, and every rate limit in this application keys on `req.ip`.
 
-* **Unset** (the default) — `req.ip` is the connecting peer. If nothing proxies the
-  app this is correct. If a proxy does, every caller shares one bucket, which is
-  inconvenient but not exploitable.
-* **A positive number** — trust that many hops. Set it to the exact number of proxies
-  in front of the app, which for a single Render or nginx hop is `1`.
+* **`1` (the default)** — trust one hop. Correct for the deployed app, where Render
+  terminates TLS and forwards.
+* **`0`, or empty** — trust nothing; `req.ip` is the connecting peer. This is what you
+  want for `npm run dev` against the app directly, where there is no proxy.
 * **`true` is refused.** It trusts the whole chain, which means trusting whatever the
-  last hop wrote, and the last hop is the client. That hands anyone a working bypass
-  of any per-IP limit by editing a header.
+  last hop wrote, and the last hop is the client. That hands anyone a working bypass of
+  every per-IP limit by editing a header, so it is not a supported value rather than a
+  discouraged one.
 
-Set this to match the deployment. Too high and limits can be forged; too low and one
-noisy client can exhaust the budget for everyone.
+Too high and limits can be forged; too low and every caller in production shares one
+bucket, so a single noisy client exhausts the budget for everyone. If you put your own
+nginx in front of Render, that is a second hop and this must become `2`.
 
 **`CORS_ORIGIN=*` is deliberate, not an oversight.** The API authenticates with bearer
 tokens rather than cookies, so reflecting the origin does not expose a session to a hostile
