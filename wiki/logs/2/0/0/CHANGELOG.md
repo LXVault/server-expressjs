@@ -2,7 +2,7 @@
 
 Released 2026-09-28.
 
-A production deployment that upgraded from 1.1.0 and changed nothing will refuse to start.
+A production deployment that upgraded from 1.0.0 and changed nothing will refuse to start.
 That is the point of the release rather than a side effect of it: the shipped fallback
 secrets are published in this repository, so a process running on them was offering
 forgeable sessions and readable stored API keys. Alongside that, every request is now
@@ -40,6 +40,14 @@ next start.
 Nothing in this release requires a user to re-enter an OpenRouter key. A row encrypted
 before 2.0.0 still opens, and is rewritten under the new derivation the first time it is
 read.
+
+**On the version numbers.** `package.json` read `1.0.0` from the first commit to this one —
+the multi-model embedding work described in [1.1.0](../1/1/0/CHANGELOG.md) shipped in the
+code and was logged here, but the manifest was never advanced and no tag was ever cut, so
+1.1.0 is documented rather than released. An operator therefore reads this upgrade as
+1.0.0 to 2.0.0. Nothing is missing between them, and the 1.1.0 log is left as written: it
+records what the code did, and rewriting a dated log to match a manifest would be a
+version claim of its own.
 
 ## Security
 
