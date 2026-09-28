@@ -2,11 +2,14 @@
 
 ## The image
 
-`Dockerfile` is a three stage build on `node:20-slim`:
+`Dockerfile` is a three stage build on `node:22-slim`:
 
 1. **base** sets `/app` as the working directory and `NODE_ENV=production`.
-2. **deps** copies `package*.json` and runs `npm install --omit=dev`, so the dependency
-   layer is cached and rebuilt only when the manifest changes.
+2. **deps** copies `package*.json` and runs `npm ci --omit=dev`, so the dependency
+   layer is cached and rebuilt only when the manifest changes, and so the image installs
+   exactly the tree that was audited rather than resolving version ranges again at build
+   time. Node 20 reached end of life in April 2026, so the previous base image no longer
+   received security fixes.
 3. **runtime** copies those `node_modules` plus the source, exposes `4000`, drops to the
    unprivileged `node` user shipped with the base image, and runs `node src/index.js`.
 
@@ -18,6 +21,11 @@ docker run --rm -p 4000:4000 \
   -e ENCRYPTION_KEY='...' \
   mcp-rag-server
 ```
+
+Because the base stage sets `NODE_ENV=production`, the image runs with the secrets guard
+armed: if `JWT_SECRET`, `ENCRYPTION_KEY` or `DATABASE_URL` is missing or still holds its
+published default, the process exits at startup rather than serving. Passing the three
+variables above is what makes the container start.
 
 ## What it expects at runtime
 

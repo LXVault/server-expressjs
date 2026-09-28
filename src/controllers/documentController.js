@@ -283,6 +283,22 @@ async function removeMember(req, res, next) {
     if (rowCount === 0) {
       return res.status(404).json({ error: 'Member not found on this document' });
     }
+
+    // Revoke this member's project tokens explicitly, in the same request that
+    // removed them. The requireApiToken guard already stops the token working
+    // the moment the membership row is gone, so this is not what enforces the
+    // removal — it is what stops the token coming back. Without it, a member
+    // removed and later re-added would find their old token working again,
+    // including any authority it had been issued under.
+    await db.query(
+      `UPDATE api_tokens
+          SET is_active = FALSE
+        WHERE project_id = $1
+          AND user_id = $2
+          AND is_active = TRUE`,
+      [id, userId]
+    );
+
     return res.status(204).send();
   } catch (err) {
     return next(err);

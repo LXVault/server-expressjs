@@ -4,15 +4,25 @@ Every variable has a fallback in `src/config/env.js`, so the server boots withou
 file. The fallbacks are development conveniences; two of them are unsafe in production and
 are marked below.
 
+**In production the fallbacks stop being available.** When `NODE_ENV=production`,
+`assertProductionSecrets` runs as the config is built and throws before the module is
+exported, so the process refuses to start if `JWT_SECRET` or `ENCRYPTION_KEY` is unset or
+still holds its published default. `DATABASE_URL` is included in the same check. A
+deployment that boots is therefore a deployment that did not run on published constants.
+
+The guard rejects a value *equal to the default* as well as an absent one, and reports
+which of the two it found, because copying `.env.example` and leaving the line untouched is
+the likelier mistake and produces the same failure.
+
 | Variable | Default | Purpose |
 |---|---|---|
-| `NODE_ENV` | `development` | Reported on the boot line. |
+| `NODE_ENV` | `development` | Reported on the boot line. Setting it to `production` is what arms the secrets guard above. |
 | `PORT` | `4000` | Listener port. |
-| `DATABASE_URL` | `postgresql://mcp_user:mcp_password@localhost:5432/mcp_rag` | PostgreSQL connection string. The database must have pgvector available. |
-| `JWT_SECRET` | `default_jwt_secret_for_development` | Signs session tokens. **Must be changed in production**, or anyone can mint a valid session. |
+| `DATABASE_URL` | `postgresql://mcp_user:mcp_password@localhost:5432/mcp_rag` | PostgreSQL connection string. The database must have pgvector available. Required in production. |
+| `JWT_SECRET` | `default_jwt_secret_for_development` | Signs session tokens. **Required in production**, or anyone can mint a valid session. |
 | `JWT_EXPIRES_IN` | `7d` | Session lifetime. |
 | `BCRYPT_SALT_ROUNDS` | `10` | Password hashing cost. |
-| `ENCRYPTION_KEY` | `default_encryption_key_change_me_in_production` | Run through SHA-256 to derive the AES-256-GCM key that encrypts users' OpenRouter keys. **Must be changed in production.** Rotating it makes every stored key undecryptable. |
+| `ENCRYPTION_KEY` | `default_encryption_key_change_me_in_production` | Run through SHA-256 to derive the AES-256-GCM key that encrypts users' OpenRouter keys. **Required in production.** Rotating it makes every stored key undecryptable. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Base URL for the OpenAI compatible embeddings endpoint. |
 | `CORS_ORIGIN` | `*` | Either `*` to reflect any origin, or a comma separated allow list. Trailing slashes are stripped before comparison, so `https://app.com/` and `https://app.com` both match. |
 | `AUTO_MIGRATE` | unset | Set to the string `false` to stop `db/init.sql` being applied on boot. Any other value, including unset, applies it. |
@@ -32,3 +42,14 @@ project spend another user's credits, so nothing in this repository reads one.
 **`.env.example` also lists frontend variables** such as `VITE_API_URL` and
 `FRONTEND_PORT`. The backend does not read them; they are there because the two services
 were once brought up from one compose file.
+
+## Rotating the secrets in a running deployment
+
+The guard stops a future misconfiguration. It cannot reach back to a deployment that
+already booted on the published constants, so rotation is a deployment step, and the two
+secrets behave differently.
+
+Rotating `JWT_SECRET` invalidates every outstanding session: users are signed out and sign
+in again. Rotating `ENCRYPTION_KEY` makes every stored OpenRouter key undecryptable, and
+each user has to re-enter theirs. Neither loses data, but both are user-visible, so they
+are worth doing deliberately rather than as part of a larger change.

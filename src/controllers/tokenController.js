@@ -5,6 +5,10 @@ const { generateRawToken, hashToken } = require('../utils/apiToken');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// How long a freshly issued or rotated project token stays valid. A token is
+// revocable by hand at any time; this is the ceiling for one nobody revokes.
+const TOKEN_TTL_DAYS = 90;
+
 function isUuid(value) {
   return typeof value === 'string' && UUID_RE.test(value);
 }
@@ -46,6 +50,7 @@ async function listTokens(req, res, next) {
               d.title AS project_title,
               t.token_name,
               t.is_active,
+              t.expires_at,
               t.last_used_at,
               t.created_at
        FROM api_tokens t
@@ -76,7 +81,7 @@ async function getProjectToken(req, res, next) {
     }
 
     const { rows } = await db.query(
-      `SELECT id, project_id, token_name, is_active, last_used_at, created_at
+      `SELECT id, project_id, token_name, is_active, expires_at, last_used_at, created_at
        FROM api_tokens
        WHERE user_id = $1 AND project_id = $2`,
       [req.user.id, id]
@@ -115,17 +120,22 @@ async function generateProjectToken(req, res, next) {
         : `${access.project.title} token`;
 
     // One token per (user, project): rotate in place on conflict.
+    // expires_at is set on issue and again on rotation, so a token is never a
+    // credential that lives forever. The column already existed and the
+    // requireApiToken guard already honoured it; nothing ever wrote it, which
+    // is why every token behaved as though it never expired.
     const { rows } = await db.query(
-      `INSERT INTO api_tokens (user_id, project_id, token_hash, token_name, is_active)
-       VALUES ($1, $2, $3, $4, TRUE)
+      `INSERT INTO api_tokens (user_id, project_id, token_hash, token_name, is_active, expires_at)
+       VALUES ($1, $2, $3, $4, TRUE, CURRENT_TIMESTAMP + $5::interval)
        ON CONFLICT (user_id, project_id)
        DO UPDATE SET token_hash   = EXCLUDED.token_hash,
                      token_name   = EXCLUDED.token_name,
                      is_active    = TRUE,
+                     expires_at   = EXCLUDED.expires_at,
                      last_used_at = NULL,
                      created_at   = CURRENT_TIMESTAMP
-       RETURNING id, project_id, token_name, is_active, last_used_at, created_at`,
-      [req.user.id, id, tokenHash, tokenName]
+       RETURNING id, project_id, token_name, is_active, last_used_at, expires_at, created_at`,
+      [req.user.id, id, tokenHash, tokenName, `${TOKEN_TTL_DAYS} days`]
     );
 
     return res.status(201).json({

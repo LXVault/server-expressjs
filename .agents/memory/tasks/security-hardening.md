@@ -244,6 +244,94 @@ reconciled.
 Depends on: task 3. Task 5 depends on the role model settled here, because revoking a
 token has to know which roles it was valid for.
 
+### Task 5 — fix/api-token-lifecycle
+
+Closes H3.
+
+**No schema change was needed, which is simpler than the plan assumed.** `db/init.sql:29`
+already declares `expires_at TIMESTAMP WITH TIME ZONE` and `apiToken.js` already honoured
+it. Nothing ever wrote it, so every token took the `NULL` default and the expiry clause was
+always satisfied. The column was correct and the code around it was correct; the issuance
+path was the only thing missing.
+
+Landed:
+
+* `src/middleware/apiToken.js`: the lookup now `LEFT JOIN document_members` and requires
+  `d.owner_id = t.user_id OR dm.user_id IS NOT NULL`. A removed member's token stops
+  resolving on the next request, with no separate revoke, and the owner is still admitted
+  from `documents.owner_id` without needing a membership row.
+* The same join selects `is_owner` and `member_role`, and the live role is threaded onto
+  `req.apiToken.role`. A token minted while someone was an editor and later demoted to
+  viewer therefore stops writing on the next call. The role is read fresh per request
+  rather than baked in at issue, which is the same principle as the membership check:
+  a token carries the authority its holder has now, not the authority they had then.
+* `src/controllers/tokenController.js`: `TOKEN_TTL_DAYS = 90`, stamped on issue and again
+  on every rotation, so re-minting cannot be used to keep a token alive forever. Both token
+  listing queries now return `expires_at`, because a user who cannot see the expiry cannot
+  act on it.
+* `src/controllers/documentController.js`: `removeMember` deactivates the removed member's
+  tokens for that project. This is **not** what makes removal take effect — the middleware
+  join already does that. It is what stops the token coming back: without it, a member
+  removed and later re-added would find their old token working again, under whatever
+  authority it had been issued with.
+
+Verified, not by inspection. Thirty-five assertions driving the real middleware and the
+real controllers against a stubbed pool, asserting on the status codes, the response
+bodies, the ordering of the two statements, and the exact SQL and bound parameters emitted:
+
+* `requireApiToken`: a missing header is 401 and sends no SQL at all; a valid owner token
+  authenticates with `role: 'owner'`; a valid member token authenticates with the live
+  member role; a token matching no row is 401 and never reaches `next()`.
+* The SQL is asserted directly — it still joins `document_members`, still requires owner
+  *or* membership, still requires `is_active`, still honours `expires_at`, still selects
+  `is_owner` and `member_role`, and still looks the token up by hash. This is a regression
+  guard: deleting the membership condition fails the suite instead of silently restoring
+  the finding.
+* Issuance: `expires_at` is inserted, computed from a bound `interval` parameter rather
+  than string-interpolated, the bound value is `90 days`, rotation re-stamps it, rotation
+  still re-activates, the `ON CONFLICT (user_id, project_id)` target still matches the
+  `uq_api_tokens_user_project` index, and the raw token is still returned exactly once. A
+  non-member is refused 403.
+* `removeMember`: 204 on success, the deactivation is scoped to both the project and the
+  removed user, and it runs *after* the membership delete. A user who was never a member
+  is 404 and has no tokens touched.
+* Placeholder arity across all three files: no query binds fewer parameters than it
+  references.
+* The application boots and answers over real HTTP: `/` and `/api/ping` 200, the two token
+  routes 401 without a JWT, an unknown path 404.
+
+**Not verified, and this is a real gap.** There is still no PostgreSQL and no Docker in
+this environment, so the stub returns rows this harness chose. That proves the code builds
+the right query, sends the right parameters, and takes the right branch on a given result
+— it does not prove PostgreSQL evaluates the `LEFT JOIN` and the `ON CONFLICT` as intended.
+Those two statements are the whole finding, and they should be exercised against a real
+pgvector database before this ships: mint a token, remove the member, confirm the next MCP
+call is 401 without any revoke having been called.
+
+**Documentation propagation, and a correction to my own process.** Change propagation was
+due in tasks 2, 3 and 4 and I did not do it there. It is done in this commit, and the gap
+is recorded rather than quietly closed:
+
+* `wiki/information/architecture.md` gained a Roles section, the API surface table now says
+  which of the two questions each route asks, and the token lifetime and membership
+  re-check are documented. The rows that said "owner or admin" for title, description,
+  upload and delete were wrong as of task 4 and had been left standing.
+* `wiki/environments/env.md` documents the production guard and what rotation costs.
+  `wiki/environments/docker.md` documents `node:22-slim`, `npm ci`, and the fact that the
+  image runs with the guard armed.
+* `.agents/wiki/context/repository-map.md` gained the two gotchas an agent would otherwise
+  rediscover the hard way: role checks go through `src/utils/roles.js`, and the token query
+  re-joins membership on purpose.
+
+**One instruction left deliberately stale.** `.agents/rules/repository.md` states that
+`requireApiToken` populates `req.apiToken` with `{ tokenId, userId, username, projectId,
+projectTitle }` — it now also carries `role` — and that role checks go through
+`assertProjectAdmin`, which is now one of two guards. That file is an instruction, and
+change propagation says a stale instruction is a discovery finding rather than an edit.
+It is reported with the rest.
+
+Depends on: task 4. Task 6 does not depend on this and could have run in either order.
+
 ## Decisions
 
 * **The guard throws rather than warns.** A process that starts with a defaulted secret
@@ -270,7 +358,14 @@ token has to know which roles it was valid for.
 * **The project's own `version` is not touched.** The instruction to take the latest
   release covers the libraries. Bumping `1.0.0` is a separate claim and belongs to the
   release task with the user's approval.
+* **A token's authority is read fresh, not baked in at issue.** Both the membership check
+  and the role now come from `document_members` on every request. The alternative — stamp
+  the role into the token at mint time — is cheaper and is what the code did, and it is
+  what makes a demotion a no-op until the token is rotated.
+* **Removal and revocation are both kept.** The middleware join is what makes a removal
+  take effect immediately; the explicit deactivation in `removeMember` is what stops the
+  token returning if the same person is re-added later. Neither alone is the fix.
 
 ## Status
 
-In progress. Tasks 1 to 4 of 9 complete.
+In progress. Tasks 1 to 5 of 9 complete.

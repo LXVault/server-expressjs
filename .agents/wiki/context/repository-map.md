@@ -22,11 +22,11 @@ routes under `/api`. Concepts and vocabulary:
 | `src/index.js` | Boot. Starts the listener, runs a database health check, applies the schema, wires graceful shutdown. |
 | `src/app.js` | The Express app: CORS policy, JSON body limit, `/health`, the `/api` mount, the 404 and error handlers. |
 | `src/config/db.js` | The `pg` pool and `healthCheck`. Anything needing a transaction takes a client from `pool`. |
-| `src/config/env.js` | Every environment variable, each with a fallback so the app boots without a `.env`. |
+| `src/config/env.js` | Every environment variable, each with a fallback so the app boots without a `.env` in development. In production the fallback secrets are refused and the process exits. |
 | `src/config/migrate.js` | Reads `db/init.sql` and applies it on boot unless `AUTO_MIGRATE=false`. |
 | `src/routes/` | Path to controller wiring, one file per feature, aggregated by `routes/index.js`. |
 | `src/controllers/` | Validation, authorization and SQL. |
-| `src/utils/` | Logic shared by more than one controller: embeddings, file ingestion, crypto, JWT, audit, user keys, API tokens. |
+| `src/utils/` | Logic shared by more than one controller: embeddings, file ingestion, crypto, JWT, audit, user keys, API tokens, roles. |
 | `src/middleware/` | `auth.js` for JWT, `apiToken.js` for per project tokens. |
 | `db/init.sql` | The one and only schema definition. Idempotent by construction. |
 
@@ -62,6 +62,16 @@ exercise the route you changed. Report it that way; do not imply a suite ran.
   MCP controllers must resolve identity and project from `req.apiToken` alone; see
   [`../../rules/repository.md`](../../rules/repository.md) for why that is a security
   invariant rather than a style preference.
+* **Role checks go through `src/utils/roles.js`.** `canWrite` and `canAdminister` are the
+  only two questions, and they take ownership as a separate flag because the owner is
+  `documents.owner_id`, not a role. Writing an inline `isOwner || role === 'admin'` puts
+  you back at the bug that file exists to prevent. Administration is stricter than writing
+  on purpose: an editor that could grant roles could promote itself.
+* **A project token is re-checked against live membership on every request.** The query in
+  `src/middleware/apiToken.js` joins `document_members` and refuses a token whose user no
+  longer owns or belongs to the project. Removing that join silently turns removal back
+  into something that needs a separate revoke, and the role it exposes comes from the same
+  row, so a demotion takes effect on the next call too.
 * **No server owned OpenRouter key.** Embedding calls spend the acting user's key. Code
   paths that assume a key is always present are wrong; a missing key is a `412`.
 * **The `embedding` column has no dimension and no ANN index.** That is deliberate, so

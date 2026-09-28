@@ -41,6 +41,36 @@ only. Nothing under `/api/mcp` accepts a project id, a user id, or a role as an 
 because that surface is driven by a language model and an argument is something a prompt
 injection can set.
 
+A project token is a grant, not a standing credential. `requireApiToken` re-checks on every
+request that its user still owns or is still a member of the project it names, so removing
+someone from a project stops their token on the next request without a separate revoke. It
+also carries an expiry, set when the token is issued or rotated. A token therefore cannot
+outlive the membership that justified it, and a token copied out of a chat log stops
+working on its own within a bounded time.
+
+## Roles
+
+`document_members.role` is one of `viewer`, `editor` or `admin`, ranked in that order.
+`src/utils/roles.js` is the only place that ranking is written down, and both questions
+the application asks go through it:
+
+| Question | Answer |
+|---|---|
+| `canWrite(isOwner, role)` | The owner, or `editor` and above. |
+| `canAdminister(isOwner, role)` | The owner, or `admin` only. |
+
+Administration is deliberately stricter than writing. An `editor` can change a project and
+its knowledge base but cannot grant roles, because an editor who could hand out roles could
+promote themselves, which would make the write grant an escalation path rather than a
+capability.
+
+The owner is not a role. It is `documents.owner_id`, passed to these functions as a
+separate flag so ownership can never be smuggled through the role column.
+
+On the web path, membership is managed by the owner only. On the MCP path it is
+owner-or-admin, because an assistant administering a project on the owner's behalf is the
+normal case there. The two differ deliberately, and the table below records which is which.
+
 ## API surface
 
 | Method and path | Auth | Purpose |
@@ -51,19 +81,22 @@ injection can set.
 | `GET /api/profile` | JWT | The current user. |
 | `GET /api/me/openrouter-key`, `PUT`, `DELETE` | JWT | Status, set and remove the caller's OpenRouter key. The key itself is never returned. |
 | `GET /api/documents`, `POST` | JWT | List accessible projects with chunk and file counts; create one. |
-| `GET /api/documents/:id`, `PUT` | JWT | Read a project; update title and summary as owner or admin. |
-| `GET /api/documents/:id/members`, `POST`, `DELETE /:userId` | JWT | Membership, managed by the owner. |
-| `GET /api/documents/:id/files`, `POST`, `DELETE /:fileId` | JWT | The project's source files. Upload and delete need owner or admin. |
-| `GET /api/documents/:id/token`, `POST`, `DELETE` | JWT | The caller's project token. |
+| `GET /api/documents/:id`, `PUT` | JWT | Read a project; update title and summary, which needs write access. |
+| `GET /api/documents/:id/members`, `POST`, `DELETE /:userId` | JWT | Membership, managed by the owner. Removing a member also revokes their project tokens. |
+| `GET /api/documents/:id/files`, `POST`, `DELETE /:fileId` | JWT | The project's source files. Upload and delete need write access. |
+| `GET /api/documents/:id/token`, `POST`, `DELETE` | JWT | The caller's project token. Any member may mint one, including a viewer. |
 | `GET /api/documents/:id/embedding-model`, `PUT` | JWT | Read the project's model plus its coverage and stored models; change it as owner or admin. |
 | `POST /api/documents/:id/embeddings/backfill` | JWT | Embed the chunks with no vector for the current model, using the caller's own key. Owner or admin. |
 | `DELETE /api/documents/:id/embeddings/:model` | JWT | Drop every vector held for one model. Owner or admin, and never the model in use. |
 | `GET /api/tokens` | JWT | Every token the caller holds. |
 | `GET /api/analysis` | JWT | Aggregates for the web app's charts. |
 | `GET /api/mcp/me`, `GET /api/mcp/project` | token | Who and which project this token is bound to. |
-| `POST /api/mcp/search`, `POST /api/mcp/knowledge`, `POST /api/mcp/files` | token | Search, append a chunk, upload a file. |
+| `POST /api/mcp/search` | token | Search. Any member. |
+| `POST /api/mcp/knowledge`, `POST /api/mcp/files` | token | Append a chunk, upload a file. Needs write access, checked before the caller's OpenRouter credits are spent. |
 | `POST /api/mcp/projects` | token | Create a project owned by the token's user. |
-| `PUT /api/mcp/project/title`, `PUT /api/mcp/project/description`, `POST /api/mcp/project/members` | token | Mutate the bound project as owner or admin. |
+| `PUT /api/mcp/project/title`, `PUT /api/mcp/project/description` | token | Rename or re-describe the bound project. Needs write access. |
+| `POST /api/mcp/project/members` | token | Add a member or change a role. Owner or admin. |
+
 
 ## Database schema
 
@@ -77,7 +110,7 @@ PostgreSQL with the `vector` extension. Defined entirely in `db/init.sql`.
 | `document_files` | `id` | An uploaded source file and its chunk count. |
 | `document_chunks` | `id` | A slice of text. Content only. Cascades from both the project and the file. |
 | `document_chunk_embeddings` | `(chunk_id, model_name)` | One vector per chunk per embedding model, with the dimension it came out at. Cascades from the chunk. |
-| `api_tokens` | `id` | A per project execution token, hashed. Unique on `(user_id, project_id)`. |
+| `api_tokens` | `id` | A per project execution token, hashed, with its own expiry. Unique on `(user_id, project_id)`. |
 | `user_openrouter_keys` | `user_id` | The user's OpenRouter key as ciphertext, IV and auth tag, plus the last four characters for display. |
 | `audit_logs` | `id` | Actor, token, action type, target and details. |
 
@@ -144,4 +177,12 @@ separate columns. Rotating `ENCRYPTION_KEY` makes every stored key undecryptable
 set once per environment and left alone.
 
 Passwords are hashed with bcrypt and never decrypted. Project tokens are stored as hashes;
-the plaintext is shown once at creation and never again.
+the plaintext is shown once at creation and never again. A user holds at most one token per
+project, so re-minting rotates it in place and the previous value stops working at once.
+
+A token is issued for 90 days and is stamped with that expiry at issue and at every
+rotation, so no token is a credential that lives forever. It is also re-checked against live
+membership on every request, and removing a member deactivates their tokens for that
+project. The two are not redundant: the membership check is what makes removal take effect
+immediately, and the deactivation is what stops the token working again if the same person
+is later re-added to the project.
