@@ -55,14 +55,23 @@ Request flow is `src/index.js` to `src/app.js` to `src/routes/` to `src/controll
 * `src/middleware/auth.js` verifies a JWT and populates `req.user`. It guards the human
   facing routes under `/api/documents`, `/api/me`, `/api/tokens`.
 * `src/middleware/apiToken.js` verifies a per project token and populates `req.apiToken`
-  with `{ tokenId, userId, username, projectId, projectTitle }`. It guards `/api/mcp`.
+  with `{ tokenId, userId, projectId, username, projectTitle, role }`. It guards `/api/mcp`.
+  `role` is `'owner'` or the member's live role, read fresh on every request, so a demotion
+  stops writes on the next call rather than at the next rotation.
 
 **Security invariant: an MCP controller resolves the acting user and the target project
 from `req.apiToken` only, never from the request body.** The MCP surface is driven by a
 language model, so any identity or project taken from arguments is a privilege escalation
-a prompt injection can reach. Role checks go through `assertProjectAdmin(projectId,
-userId)` in `src/controllers/mcpController.js` using those token values. Do not add an
-MCP route that accepts a project id, a user id, or a role as a parameter.
+a prompt injection can reach. Do not add an MCP route that accepts a project id, a user
+id, or a role as a parameter.
+
+**Role checks go through `src/utils/roles.js`, not through a controller helper.**
+`canWrite(isOwner, role)` and `canAdminister(isOwner, role)` are the only two questions the
+application asks, and they take ownership as a separate flag because the owner is
+`documents.owner_id` and not a role. `assertProjectWrite` and `assertProjectAdmin` in
+`src/controllers/mcpController.js` are callers of those, not the definition, and the web
+path in `documentController.js` calls the same two. An inline `isOwner || role === 'admin'`
+puts back the bug that file exists to prevent.
 
 ## Embeddings
 

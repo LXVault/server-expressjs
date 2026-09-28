@@ -51,6 +51,7 @@ the test is how a check passes without having checked anything.
 | 7 | Stop the information the error paths give away | `helmet`, health, error handler, timing, enumeration | server-expressjs | `fix/error-disclosure` |  |
 | 8 | Derive the key properly | scrypt and a persisted per-row salt | server-expressjs | `fix/encryption-kdf` |  |
 | 9 | Release | `2.0.0`, changelog, this record closed | server-expressjs | `chore/security-hardening-release` |  |
+| 10 | Membership is owner-or-admin on the web path too | `documentController.js`, the docs that said otherwise | server-expressjs | `chore/security-hardening-release` |  |
 
 Tasks 2 to 8 stack in this order; each branches from its predecessor. Two further
 chains run in the other repositories, ordered after this one because both read the API
@@ -775,6 +776,58 @@ deliberately left open, and why:
 * **The 120/min MCP budget under real load.** A judgement call, unmeasured, and recorded as
   the first number to revisit.
 
+### Task 10 — member management is owner-or-admin
+
+**Not in the original plan.** It came out of a discovery finding at the end of task 9, and
+the user's answer to it is the reason it is a change in this repository rather than in
+chain 2.
+
+The state I found: `src/utils/roles.js` documents `admin` as "everything an editor can do,
+plus member management and embedding model configuration", and `canAdminister` is
+owner-or-admin. The MCP path honoured that. **The web path did not** —
+`documentController.js` asked `access.isOwner` alone, so an admin could add and remove
+members through an assistant but not through the browser.
+
+Asked whether that asymmetry was deliberate, I found I had written "the two differ
+deliberately" into `architecture.md` on the strength of nothing. I had not established it,
+it is not in `REPORT.md`, and the user was never asked. The answer was that membership is
+managed by **both the owner and admins**. Which makes the web path the one that was wrong,
+and this a change in this repository rather than in chain 2.
+
+So it is a bug against a role model that already said so, not a policy change. Worth
+recording, because the documentation had hardened the code's behaviour into a design
+decision, and the documentation was the thing that was wrong. An unattributed "deliberately"
+is worse than an obvious bug: it protects the bug from being looked at.
+
+* `addMember` and `removeMember` ask `canAdminister(access.isOwner, access.memberRole)`.
+* `listMembers` returns `canManage: canAdminister(...)`. The web app at
+  `client-reactjs/src/pages/Members.jsx` already gates its controls on `canManage`, so
+  widening the server side makes the buttons appear with **no client change at all** — the
+  third repository does not need touching for this.
+* The 403 messages said "Only the document owner can …", which is now untrue. They say
+  owner-or-admin, matching the wording the project-update route already used.
+* `ALLOWED_ROLES` in this controller was a second copy of the role list. Deleted in favour
+  of `isMemberRole` and `MEMBER_ROLES` from `roles.js`. Side effect: the 400 for an invalid
+  role now lists them in ascending authority (`viewer, editor, admin`) rather than the old
+  order, because that is the order `roles.js` publishes.
+
+Verified: **12 new assertions** in `.agents/wiki/context/t7-harness.js`, one per role per
+route, plus the four `canManage` values. The access stub is now caller-dependent — it
+resolves `is_owner` and `member_role` from the caller id instead of hard-coding the owner —
+so the authorization is asked about an owner, an admin, an editor and a viewer rather than
+only the owner. 56 assertions there now, 0 failed.
+
+Two things about those assertions, because both would have read as passes:
+
+* The authorized cases assert the **exact** status the owner gets — 404 from the user
+  lookup, 404 from the delete — not "not 403". A 500 from a stub that fell through to the
+  catch-all would have satisfied a weaker assertion and proved nothing.
+* `tokenFor` reads the live `token_version` rather than the constant declared at the top of
+  the harness. The logout block earlier in the same file bumps the editor's, so a token
+  signed with the stale value is refused at `requireAuth` with a 401 — which made all three
+  editor assertions fail, and would then have made the "neither refusal names a role" check
+  pass vacuously against two 401s.
+
 ## Decisions
 
 * **The guard throws rather than warns.** A process that starts with a defaulted secret
@@ -882,6 +935,12 @@ deliberately left open, and why:
   so there is no low-entropy secret to stretch. A KDF earns its cost on a value a human
   chose, which is precisely what `ENCRYPTION_KEY` is and precisely what a project token is
   not — recorded so a future reader does not "fix" it.
+* **Membership is owner-or-admin on every surface, and that is the user's decision.** It
+  reads as a change to a policy, and it is not: `roles.js` already documented `admin` as
+  holding member management, and the MCP path already behaved this way. What it changes is
+  that a web admin can now do what an MCP admin could, which is what the role model said
+  the whole time. What I got wrong was writing "deliberately" over a difference I had not
+  investigated — see task 10.
 
 ## Cross-repository follow-up, not done here
 
@@ -898,12 +957,28 @@ is scheduled as `fix/session-hygiene` in that chain, where it belongs.
 
 ## Status
 
-**Complete for this repository.** All nine tasks are done and committed on stacked local
+**Complete for this repository.** All ten tasks are done and committed on stacked local
 branches, ending at `chore/security-hardening-release`. The release is `2.0.0`.
+
+Task 10 was added after task 9, during the release, from a discovery finding rather than
+from the plan. It went into this repository rather than chain 2 because the user's answer
+to the question put the defect on the web path, and the web path is here.
 
 Nothing has been pushed and no pull request has been opened — the user asked to review the
 diff first. Opening and merging the pull request are separate gates and both are still
 closed.
+
+Four discovery findings were presented at the end of task 9 rather than self-applied, as
+the protocol requires. The user selected three, and they are committed:
+
+* `.agents/rules/repository.md` — the `req.apiToken` shape was missing `role`, and the
+  role-check sentence still pointed at `assertProjectAdmin` as if it were the definition
+  rather than a caller of `roles.js`. The stale rule governed the MCP trust boundary.
+* `AGENTS.md` — `Adopted shared-set version` read `1.0.0` while the workspace cache holds
+  `1/0/0`, which made the drift check compare against a stamp that was never right.
+* `.gitignore` and `.env.example` — both referenced a `docker-compose.yml` and a
+  `docker-compose.yml.example` that no longer exist, and
+  `wiki/environments/docker.md:48` already recorded the removal.
 
 Two further chains run in the other repositories of this workspace, at merge order 2 of 3
 (`mcp`) and 3 of 3 (`client-reactjs`). They are not started. Each needs its own task record
