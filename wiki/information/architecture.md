@@ -224,7 +224,7 @@ PostgreSQL with the `vector` extension. Defined entirely in `db/init.sql`.
 | `document_chunks` | `id` | A slice of text. Content only. Cascades from both the project and the file. |
 | `document_chunk_embeddings` | `(chunk_id, model_name)` | One vector per chunk per embedding model, with the dimension it came out at. Cascades from the chunk. |
 | `api_tokens` | `id` | A per project execution token, hashed, with its own expiry. Unique on `(user_id, project_id)`. |
-| `user_openrouter_keys` | `user_id` | The user's OpenRouter key as ciphertext, IV and auth tag, plus the last four characters for display. |
+| `user_openrouter_keys` | `user_id` | The user's OpenRouter key as ciphertext, IV and auth tag, with the salt and derivation name needed to decrypt it, plus the last four characters for display. |
 | `audit_logs` | `id` | Actor, token, action type, target and details. |
 
 Three schema decisions worth knowing:
@@ -284,10 +284,38 @@ that was enforced may hold a bare name and its chunks must keep working.
 
 ## Secrets
 
-`ENCRYPTION_KEY` is run through SHA-256 to derive a stable 32 byte key, which AES-256-GCM
-uses to encrypt each user's OpenRouter key. Ciphertext, IV and auth tag are stored in
-separate columns. Rotating `ENCRYPTION_KEY` makes every stored key undecryptable, so it is
-set once per environment and left alone.
+A user's OpenRouter key is encrypted with AES-256-GCM, and the 32-byte AES key it is
+encrypted under is derived from `ENCRYPTION_KEY` **per stored row**: every row carries its
+own random 16-byte salt, and `ENCRYPTION_KEY` is combined with that salt through scrypt
+(`N=2**15`, `r=8`, `p=1`) to produce the key. Salt, derivation name, ciphertext, IV and auth
+tag are all stored alongside each other, because a ciphertext without them cannot be
+opened.
+
+The per-row salt is what makes this worth doing. With one global derivation, a
+stolen ciphertext is attacked together with every other stolen one, and — more to the
+point — a single fast hash over `ENCRYPTION_KEY` means a weak `ENCRYPTION_KEY` is
+exhausted at whatever rate the attacker's hardware allows. Any string is still accepted
+as `ENCRYPTION_KEY`, and the KDF is what makes that acceptable rather than a rule nobody
+follows.
+
+Those parameters are not configurable, deliberately: a KDF whose cost can be lowered by
+an environment variable is one mis-set variable away from not being a KDF, and the failure
+is silent. Derived keys are cached per process, because the derivation is deterministic
+and the value is resolved once at require time, so a cache cannot go stale inside a
+process lifetime — rotating `ENCRYPTION_KEY` is a restart by definition.
+
+Rows written before this change carry no salt and no derivation name, and still open
+through the single unsalted SHA-256 pass they were written with. The first time one is
+read it is rewritten under scrypt, so no user is asked to re-enter their key and no
+ciphertext stays on the fast derivation indefinitely. That rewrite is best effort and
+never fails the caller's request; see `getDecryptedOpenRouterKey` in `src/utils/userKeys.js`.
+
+Rotating `ENCRYPTION_KEY` still makes every stored key undecryptable, so it is set once
+per environment and left alone.
+
+Note the contrast with `src/utils/apiToken.js`, which hashes project tokens with a single
+SHA-256 and is correct: those are 32 bytes of `crypto.randomBytes`, so there is no
+low-entropy secret to stretch. A KDF only earns its cost on a value a human chose.
 
 Passwords are hashed with bcrypt and never decrypted. Project tokens are stored as hashes;
 the plaintext is shown once at creation and never again. A user holds at most one token per

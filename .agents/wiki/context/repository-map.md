@@ -26,7 +26,7 @@ routes under `/api`. Concepts and vocabulary:
 | `src/config/migrate.js` | Reads `db/init.sql` and applies it on boot unless `AUTO_MIGRATE=false`. |
 | `src/routes/` | Path to controller wiring, one file per feature, aggregated by `routes/index.js`. |
 | `src/controllers/` | Validation, authorization and SQL. |
-| `src/utils/` | Logic shared by more than one controller: embeddings, file ingestion, crypto, JWT, audit, user keys, API tokens, roles, document access. |
+| `src/utils/` | Logic shared by more than one controller: embeddings, file ingestion, crypto (scrypt + AES-256-GCM for stored secrets), JWT, audit, user keys, API tokens, roles, document access. |
 | `src/middleware/` | `auth.js` for JWT, `apiToken.js` for per project tokens, `documentAccess.js` for project authorization ahead of the upload parser, `rateLimit.js` for the request budgets. |
 | `db/init.sql` | The one and only schema definition. Idempotent by construction. |
 
@@ -127,6 +127,28 @@ exercise the route you changed. Report it that way; do not imply a suite ran.
   the absent case. An early `return` before the compare is a working enumeration oracle
   even though the message is generic, and the two `401`s are byte-identical so a
   byte-comparison test will not catch it. Time the two paths if you touch that function.
+* **The AES key is derived per row, and `encrypt`/`decrypt` are async.** `src/utils/crypto.js`
+  generates a salt per encryption and scrypts it together with `ENCRYPTION_KEY`. Two things
+  follow. Never switch to `scryptSync`: it holds the event loop for the whole ~100 ms
+  derivation, and every search, upload and backfill reads a key. And never call
+  `deriveKey` with a fresh salt from `encrypt` — `encrypt` derives outside the cache on
+  purpose, because a salt that has just been invented can never be a hit and routing it
+  through the cache would evict entries that can.
+* **A stored row with no `key_kdf` is legacy, not corrupt.** The two columns added to
+  `db/init.sql` are nullable on purpose, and a row carrying neither is one written before
+  the scrypt change — it opens through the old derivation. `getDecryptedOpenRouterKey`
+  rewrites such a row under scrypt on first read. That rewrite is a maintenance write on a
+  read path and is best effort by design: the plaintext has already been recovered, so
+  failing the caller's request over it is worse than retrying on the next read. Do not make
+  it throw, and do not add a separate backfill script.
+* **`db/init.sql` must keep those two columns nullable.** Every statement in that file runs
+  on every boot, so `ADD COLUMN IF NOT EXISTS key_salt TEXT NOT NULL` would fail the boot
+  of any database that already holds rows — the exact failure the idempotence rule exists
+  to prevent.
+* **The single SHA-256 in `src/utils/apiToken.js` is correct and must stay.** It hashes 32
+  bytes of `crypto.randomBytes`, so there is no low-entropy secret to stretch and a KDF
+  would only cost latency. A KDF earns its cost on a value a human chose, which is exactly
+  what `ENCRYPTION_KEY` is.
 * **Error text crosses a trust boundary in three places.** The central handler already
   blanks `5xx` in production, but `/health`, the upload `422` and the backfill `502` sit on
   the `4xx` side while carrying text from postgres, the PDF parser or OpenRouter. Each has

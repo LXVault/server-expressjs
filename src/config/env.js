@@ -113,10 +113,17 @@ const config = {
   bcryptSaltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS, 10) || 10,
 
   // Secret used to derive the AES-256 key that encrypts users' OpenRouter API
-  // keys at rest. MUST be overridden in production. Any string works — it is
-  // hashed once with SHA-256 to produce the 32-byte key. That is a single fast
-  // pass, not a key derivation function; the scrypt change that makes this true
-  // is tracked in .agents/memory/tasks/security-hardening.md, task 8.
+  // keys at rest. MUST be overridden in production.
+  //
+  // The derivation itself lives in src/utils/crypto.js, and it is per stored row
+  // rather than per process: each row's ciphertext comes with its own random
+  // salt, and that salt is scrypt'd with this value (N=2**15, r=8) to get the
+  // 32-byte AES key. Any string is accepted, which is exactly why it is worth
+  // spending the memory on — the KDF is what makes a memorable passphrase
+  // survivable rather than a fast hash to grind through.
+  //
+  // Rotating it makes every stored key undecryptable and there is no
+  // re-encryption path, so it is set once per environment and left alone.
   encryptionKey:
     process.env.ENCRYPTION_KEY || 'default_encryption_key_change_me_in_production',
 

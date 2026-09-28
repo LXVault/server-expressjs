@@ -210,6 +210,18 @@ CREATE TABLE IF NOT EXISTS user_openrouter_keys (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Brings older databases up to date. The AES key protecting a stored API key is
+-- derived per row from ENCRYPTION_KEY and that row's salt, and both travel with
+-- the ciphertext, so a row has to carry them to be opened at all.
+--
+-- Both columns are nullable and a row with neither is a row written before this
+-- existed, which was encrypted under a single unsalted SHA-256 pass. Those rows
+-- still open — src/utils/crypto.js reads them through that derivation — and
+-- src/utils/userKeys.js rewrites one under scrypt the first time it is read, so
+-- nothing has to be backfilled and no user is asked to re-enter their key.
+ALTER TABLE user_openrouter_keys ADD COLUMN IF NOT EXISTS key_salt TEXT;
+ALTER TABLE user_openrouter_keys ADD COLUMN IF NOT EXISTS key_kdf VARCHAR(16);
+
 -- ---------------------------------------------------------------------------
 -- Knowledge-base file uploads (RAG ingestion).
 -- ---------------------------------------------------------------------------

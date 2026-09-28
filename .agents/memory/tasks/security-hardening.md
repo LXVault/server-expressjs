@@ -630,6 +630,107 @@ exercised once against a real pgvector instance before this ships.
 
 Depends on: task 5.
 
+### Task 8 — fix/encryption-kdf
+
+Closes M6. The finding was narrow and precise: `ENCRYPTION_KEY` was passed through one
+unsalted SHA-256 to get the 32-byte AES key, and the code and `.env.example` both described
+that as a key derivation function. It is not one. A single fast hash means a weak
+`ENCRYPTION_KEY` is exhausted at whatever rate the attacker's hardware allows, and any
+string is still accepted as `ENCRYPTION_KEY` — which is the whole problem, because the
+documented advice is `openssl rand -hex 32` and the documented fact is that anything works.
+
+Landed:
+
+* **`src/utils/crypto.js` rewritten around scrypt.** `N=2**15, r=8, p=1`, which is
+  128 × 8 × 32768 = 32 MiB per derivation. That is *exactly* node's default `maxmem`, so
+  the limit has to be raised to 64 MiB or the call is refused outright with
+  `Invalid scrypt params` — a failure that would have looked like a bad key.
+* **The derivation is per row, not per process.** Every encryption generates its own 16-byte
+  salt, and the AES key comes from `ENCRYPTION_KEY` and *that* salt. A per-process key means
+  one stolen ciphertext is attacked together with every other stolen one, and there is no
+  way to contain a weak salt to the rows that share it.
+* **The derivation is recorded on the row** (`key_kdf`), alongside `key_salt`. A ciphertext
+  without them cannot be opened, so they are stored with it, and the name is what lets a
+  future change to the parameters leave existing rows alone.
+* **`encrypt` and `decrypt` are now async**, because the derivation is. `scryptSync` would
+  hold the event loop for ~100 ms on the request path, and the call sites are every search,
+  upload, chunk append and backfill. Measured: two derivations in parallel cost about what
+  one costs, which is what the threadpool gives and what `scryptSync` would not.
+* **Derived keys are cached per process** by (derivation, salt), bounded at 64 entries with
+  least-recently-used eviction. The derivation is deterministic and `config.encryptionKey`
+  is resolved once at require time, so an entry cannot go stale inside a process lifetime —
+  rotating the key is a restart by definition. Without the cache every request pays ~100 ms
+  and 32 MiB of CPU for a key it already had.
+* **`encrypt` derives outside the cache.** A salt invented one line earlier can never be a
+  hit, and going through the cache would evict entries that can.
+* **An unrecognised derivation name is refused by name**, not treated as legacy. A fallback
+  would report a corrupt row or a downgrade attempt as an opaque GCM authentication failure.
+* **Rows written before this change still open**, through the old single SHA-256 pass, and
+  **are rewritten under scrypt the first time they are read** — at most once per row.
+* **`db/init.sql` gains `key_salt TEXT` and `key_kdf VARCHAR(16)`**, both nullable, both
+  `ADD COLUMN IF NOT EXISTS`, which is how every other column addition in this repository
+  is done.
+
+**This is where I departed from the plan, and in the direction of less breakage.** `PLAN.md`
+specified `SALT BYTEA NOT NULL` and rated the task High risk "needs a re-encryption or
+re-prompt path", recommending it be landed only once the re-prompt cost was known. The
+nullable columns and the lazy upgrade make that cost zero: no user is asked to re-enter
+their OpenRouter key, and the write happens once, silently, on a read the user was making
+anyway. The plan's concern was real and this is the answer to it, so I did not stop to ask
+about it.
+
+I also used `TEXT` rather than `BYTEA` for the salt, against the plan. The three sibling
+columns holding the same row's binary data are base64 `TEXT`, and a row with four columns
+of one type and one of another is worse than a base64 round trip. Recorded because it is a
+deviation, not because it is important.
+
+Verified: **44 assertions** in `.agents/wiki/context/t8-kdf.js` and **5** in
+`t8-boot.js`. The pool stub holds a real `user_openrouter_keys` store that the application
+writes to, because the whole change is a read that may rewrite the row and a stub that
+discards writes would have reported the upgrade as working while proving nothing.
+
+* Round trip, and a second encryption of the same plaintext producing a different salt, a
+  different IV and a different ciphertext.
+* **A ciphertext read under another salt throws**, and so does one read under the legacy
+  derivation. That is the plan's own check, and it is the reason the salt is stored with
+  the row rather than beside it.
+* A modified ciphertext, IV and auth tag are each refused — the GCM tag doing its job.
+* **A row written by the old code opens**, and opens identically through an explicit
+  `sha256` name. The harness re-implements the old derivation from the env var directly
+  rather than importing it, so "old rows still work" is checked against the old algorithm
+  and not against a re-export of the new one.
+* An unrecognised derivation, and a row marked scrypt with no salt, are each refused.
+* The second read of a salt is served from cache — measured, first call versus second.
+* Two derivations in parallel cost about one.
+* A legacy row reads back as plaintext, is rewritten under scrypt on first read, is
+  rewritten **exactly once**, leaves `updated_at` alone, and is not rewritten again. A row
+  already on scrypt is not rewritten at all.
+* **A failed upgrade still returns the key.** The stub is told to reject the write; the
+  caller's read succeeds, the write is logged, and the row is left to be retried.
+* `PUT /api/me/openrouter-key` over real HTTP stores a salt and the derivation name, the
+  plaintext appears nowhere in the row, and it reads back. That last leg is the one that
+  catches a mis-ordered bind parameter, which testing the controller alone would not.
+
+Across a real process boundary, in `t8-boot.js`: a ciphertext written by this process opens
+in a fresh one with the same key, does not open with a different one, and a legacy
+ciphertext behaves the same way. The derivation is deterministic across restarts, which is
+what stops a deploy from locking everyone out of their own key.
+
+**One harness bug, of the kind that hides a real defect.** I built the legacy test row by
+spreading encryption output straight onto it, so every `key_*` column was `undefined` and
+the read failed — for a reason that had nothing to do with the KDF, which is exactly how a
+harness sends you looking in the wrong place. `asRow()` now maps the parts onto the column
+names the code actually reads.
+
+**Not verified.** Still no PostgreSQL, so the two `ALTER`s and the `UPDATE` that performs
+the upgrade are unexercised against a live database. The upgrade is a plain statement
+against columns this repository defines, and the ALTERs follow the same idempotent pattern
+as the `token_version` one in task 7, but neither has run anywhere real. This is the last
+task that touches the database, and it is worth one pass against a live pgvector instance
+before the release.
+
+Depends on: task 7.
+
 ## Decisions
 
 * **The guard throws rather than warns.** A process that starts with a defaulted secret
@@ -713,6 +814,30 @@ Depends on: task 5.
 * **`X-Powered-By` is off and helmet is on** — recorded as a decision rather than a
   preference, because "we already have a framework that could do this" is a real argument
   and the answer is that hand-maintaining a header set is how they go stale.
+* **The KDF cost is hard-coded, not configurable.** A KDF whose parameters can be lowered by
+  an environment variable is one mis-set variable away from not being a KDF, and that
+  failure is silent — the data is still encrypted, just cheaply. There is no legitimate
+  reason to run this at a lower cost in development that is worth the possibility of it in
+  production.
+* **The derivation is per row, and the row carries its salt and the name of the
+  derivation.** Per process would mean every stored key shares one key, so one stolen
+  ciphertext is attacked alongside every other one and a weak salt is not contained to the
+  rows that share it. Storing the name is what makes a future change to the parameters a
+  non-event rather than a re-encryption project.
+* **Existing rows are upgraded on read rather than in a migration.** The plan rated this
+  the High-risk task and wanted to know the re-prompt cost before landing it. Making both
+  new columns nullable and rewriting a legacy row the first time it is read makes that cost
+  zero, which is a better answer than asking. The upgrade is best effort and never fails
+  the caller's request — the plaintext has already been recovered, so refusing it would be
+  worse than retrying on the next read.
+* **Derived keys are cached, and that is safe only because the value is require-time.** If
+  `ENCRYPTION_KEY` were ever read per request the cache would be a stale-key bug. Rotating
+  the key is a restart by definition, so it is a constraint rather than a coincidence, and
+  it is written down in `crypto.js` so the next reader knows it is load-bearing.
+* **`apiToken.js` keeps its single SHA-256.** It hashes 32 bytes of `crypto.randomBytes`,
+  so there is no low-entropy secret to stretch. A KDF earns its cost on a value a human
+  chose, which is precisely what `ENCRYPTION_KEY` is and precisely what a project token is
+  not — recorded so a future reader does not "fix" it.
 
 ## Cross-repository follow-up, not done here
 
@@ -729,6 +854,9 @@ is scheduled as `fix/session-hygiene` in that chain, where it belongs.
 
 ## Status
 
-In progress. Tasks 1 to 7 of 9 complete. Task 8 (the encryption KDF, a breaking schema
-change) is next; task 9 (the release) follows it. Two of the nine are in the other two
-repositories of this workspace, on their own chains and their own merge order.
+In progress. Tasks 1 to 8 of 9 complete. Task 9 (the release: version, changelog, this
+record closed) is next. Two further chains run in the other repositories of this workspace,
+at merge order 2 of 3 and 3 of 3.
+
+Every finding in `REPORT.md` is now either closed or explicitly listed as deferred. The
+deferred ones, with the reason, are in the PR body when this branch is opened.

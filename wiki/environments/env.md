@@ -26,7 +26,7 @@ the likelier mistake and produces the same failure.
 | `JWT_SECRET` | `default_jwt_secret_for_development` | Signs session tokens. **Required in production**, or anyone can mint a valid session. |
 | `JWT_EXPIRES_IN` | `7d` | Session lifetime. |
 | `BCRYPT_SALT_ROUNDS` | `10` | Password hashing cost. |
-| `ENCRYPTION_KEY` | `default_encryption_key_change_me_in_production` | Run through SHA-256 to derive the AES-256-GCM key that encrypts users' OpenRouter keys. **Required in production.** Rotating it makes every stored key undecryptable. |
+| `ENCRYPTION_KEY` | `default_encryption_key_change_me_in_production` | Combined with each stored key's own random salt and passed through scrypt (`N=2**15`, `r=8`) to derive the AES-256-GCM key that encrypts a user's OpenRouter key. **Required in production.** Rotating it makes every stored key undecryptable. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Base URL for the OpenAI compatible embeddings endpoint. |
 | `CORS_ORIGIN` | `http://localhost:5173` | Comma-separated allow list of browser origins. Trailing slashes are stripped before comparison, so `https://app.com/` and `https://app.com` both match. `*` reflects any origin and **production refuses to start on it** unless `ALLOW_ANY_ORIGIN=true`. Required in production. |
 | `ALLOW_ANY_ORIGIN` | unset | Set to `true` to let production run with `CORS_ORIGIN=*`. Only for a deployment with no browser client, or one where a single origin serves both the API and the app. |
