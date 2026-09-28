@@ -189,6 +189,13 @@ not through the browser was a difference in the interface, not in the authority.
 The owner is not a role. It is `documents.owner_id`, passed to these functions as a
 separate flag so ownership can never be smuggled through the role column.
 
+**One refusal is not a role question.** `POST /api/mcp/projects` is refused outright, and
+deliberately not expressed through either function above. A project token is minted for
+one project, and creating a project is not work scoped to that project — so there is no
+role whose answer would be correct, and picking one would dress a product decision up as
+an authorization rule. The web app still creates projects; see
+`POST /api/documents`. See task 11 in the task record.
+
 ## API surface
 
 | Method and path | Auth | Purpose |
@@ -212,7 +219,7 @@ separate flag so ownership can never be smuggled through the role column.
 | `GET /api/mcp/me`, `GET /api/mcp/project` | token | Who and which project this token is bound to. |
 | `POST /api/mcp/search` | token | Search. Any member. |
 | `POST /api/mcp/knowledge`, `POST /api/mcp/files` | token | Append a chunk, upload a file. Needs write access, checked before the caller's OpenRouter credits are spent. |
-| `POST /api/mcp/projects` | token | Create a project owned by the token's user. |
+| `POST /api/mcp/projects` | token | **Refused, always.** A project token is minted for one project, and creating one is not work scoped to that project. Create it in the web app. |
 | `PUT /api/mcp/project/title`, `PUT /api/mcp/project/description` | token | Rename or re-describe the bound project. Needs write access. |
 | `POST /api/mcp/project/members` | token | Add a member or change a role. Owner or admin, the same test as the web path. |
 

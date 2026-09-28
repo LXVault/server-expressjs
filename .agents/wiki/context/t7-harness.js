@@ -73,6 +73,19 @@ users = users.map((u) => ({
 }));
 
 let logoutBumps = 0;
+let insertDocumentsCalls = 0;
+
+// The MCP surface authenticates with a per-project API token rather than a
+// login session, so these assertions need real token values. hashToken is the
+// same function the middleware hashes with, so these are not made-up digests
+// the stub could match on anything.
+const { hashToken } = require(path.join(ROOT, 'src/utils/apiToken'));
+const OWNER_API_TOKEN = 'probe-token-for-the-project-owner';
+const VIEWER_API_TOKEN = 'probe-token-for-a-viewer';
+const API_TOKEN_HOLDERS = {
+  [hashToken(OWNER_API_TOKEN)]: U.owner,
+  [hashToken(VIEWER_API_TOKEN)]: U.viewer,
+};
 
 const pool = {
   async query(sql, params) {
@@ -124,6 +137,47 @@ const pool = {
     if (/SELECT id, username, email FROM users WHERE username/.test(text)) {
       const row = users.find((u) => u.username === params[0] || u.email === params[0]);
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+    }
+
+    // An API token resolving to one of the users above, so the MCP surface can
+    // be reached. This branch MUST come before the project-access branch below:
+    // that one matches on /member_role/, and the token query selects
+    // `dm.role AS member_role`, so the token lookup would otherwise be answered
+    // with a project row — which resolves to no principal at all, and makes the
+    // MCP assertions fail for a reason that has nothing to do with the code
+    // under test.
+    //
+    // Two tokens, one for the owner and one for a viewer, because the creation
+    // guard is deliberately NOT role-derived. A test that only asked about a
+    // viewer could not tell an unconditional refusal from a canWrite check that
+    // happens to refuse a viewer.
+    if (/FROM api_tokens t/.test(text)) {
+      const holder = API_TOKEN_HOLDERS[params[0]];
+      if (!holder) return { rows: [], rowCount: 0 };
+      return {
+        rows: [{
+          token_id: `token-for-${holder.username}`,
+          user_id: holder.id,
+          project_id: PROJECT.id,
+          username: holder.username,
+          project_title: 'Probe project',
+          is_owner: holder.id === U.owner.id,
+          member_role: ROLE_BY_USER[holder.id] || null,
+        }],
+        rowCount: 1,
+      };
+    }
+
+    if (/UPDATE api_tokens SET last_used_at/.test(text)) {
+      return { rows: [], rowCount: 1 };
+    }
+
+    // Counted rather than merely absent: the creation assertions claim no
+    // project row was written, and that claim is only worth anything if a
+    // write would have been visible here.
+    if (/INSERT INTO documents/.test(text)) {
+      insertDocumentsCalls += 1;
+      return { rows: [], rowCount: 1 };
     }
 
     // A project, with the caller's relationship resolved per user, so the
@@ -468,6 +522,40 @@ function req(method, path, { body, token, headers = {} } = {}) {
   eq('an admin reaches the delete', await removeAs(U.admin), 404);
   eq('an editor is refused', await removeAs(U.editor), 403);
   eq('the owner reaches the delete', await removeAs(U.owner), 404);
+
+  // ------------------------------------------------- project creation
+  // A project token is minted for one project, and creating a project is not
+  // work scoped to that project — so POST /api/mcp/projects is refused
+  // outright. It is refused for EVERY role, which is the point: a guard written
+  // as canWrite would also refuse a viewer, and these assertions are what tell
+  // the two designs apart. A role-derived guard would answer 403 here for the
+  // viewer and something else for the owner.
+  console.log('\nA project token cannot create a project, whatever its role');
+  const createAs = (t) => req('POST', '/api/mcp/projects', { token: t, body: { title: 'smuggled' } });
+
+  const createAsOwner = await createAs(OWNER_API_TOKEN);
+  eq('the owner is refused', createAsOwner.status, 403);
+  const createAsViewer = await createAs(VIEWER_API_TOKEN);
+  eq('a viewer is refused', createAsViewer.status, 403);
+  eq('both roles get the identical answer',
+    createAsOwner.raw, createAsViewer.raw);
+  check('the refusal names the web app as the way to create one',
+    /web app/i.test(createAsOwner.raw), createAsOwner.raw);
+  check('the refusal does not echo the submitted title back',
+    !/smuggled/.test(createAsOwner.raw), createAsOwner.raw);
+  // The title is never validated, because nothing is created — assert the write
+  // never happened rather than assuming it, so a future refactor that moved the
+  // guard below validation would show up here.
+  check('no INSERT INTO documents was issued for the refused request',
+    insertDocumentsCalls === 0, `saw ${insertDocumentsCalls}`);
+
+  // The refusals above are only meaningful if the token really was accepted and
+  // the route really was reached. /me is the read that costs nothing, so a 200
+  // here proves the middleware resolved the token and attached a principal.
+  const whoami = await req('GET', '/api/mcp/me', { token: OWNER_API_TOKEN });
+  eq('the same token is accepted on a read, so the 403 above is the guard and not auth',
+    whoami.status, 200);
+  eq('and it resolves to the owner', whoami.body && whoami.body.user && whoami.body.user.username, U.owner.username);
 
   // ---------------------------------------------------------------- M1
   console.log('\nM1 — CORS policy is an allow list');

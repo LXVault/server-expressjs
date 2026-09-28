@@ -336,44 +336,34 @@ async function assertProjectAdmin(projectId, userId) {
 }
 
 /**
- * POST /api/mcp/projects  (API-token auth)
- * Body: { title, summary? }
- * Creates a NEW project owned by the token's user. The owner is taken from the
- * token (req.apiToken.userId), so it cannot be spoofed via tool arguments.
+ * POST /api/mcp/projects  (API-token auth) — refused.
+ *
+ * A project token is minted for ONE project; that is the whole of its grant, and
+ * `req.apiToken.projectId` is the only project any other tool here may touch. Creating a
+ * project is not work scoped to that project, so honouring it would let a token act
+ * outside the scope it was issued for — a token for project A minting projects B, C, D.
+ *
+ * This is deliberately NOT expressed as a role check. `canWrite` asks "may this user write
+ * to this project", and writing to project A does not authorize creating project B; there
+ * is no role that answers the question, and inventing one would dress a product decision
+ * up as an authorization rule. Project creation happens in the web app, where a person
+ * creates it, names it, and sees it. The same reasoning removes `admin` from the MCP
+ * `add_member` enum: an admin grant is a thing a human confirms.
+ *
+ * The web app's own POST /api/documents is unchanged and still lets any signed-in user
+ * create a project — that is the product's answer to the question, and this endpoint is
+ * no longer a second, unattended way to ask it.
  */
-async function createProject(req, res, next) {
-  try {
-    const { userId, tokenId } = req.apiToken;
-    const { title, summary } = req.body || {};
-    if (!title || !String(title).trim()) {
-      return res.status(400).json({ error: 'title is required' });
-    }
-
-    const { rows } = await db.query(
-      `INSERT INTO documents (owner_id, title, summary)
-       VALUES ($1, $2, $3)
-       RETURNING id, title, summary, owner_id, embedding_model, created_at, updated_at`,
-      [userId, String(title).trim(), summary ? String(summary).trim() : null]
-    );
-    const project = rows[0];
-
-    await recordAudit({
-      userId,
-      tokenId,
-      actionType: 'mcp.create_project',
-      resourceTable: 'documents',
-      resourceId: project.id,
-      details: { title: project.title },
-    });
-
-    return res.status(201).json({ project });
-  } catch (err) {
-    return next(err);
-  }
+async function createProject(req, res) {
+  return res.status(403).json({
+    error:
+      'A project API token cannot create a project. Create one in the web app, then ' +
+      'mint a token for it from that project\'s Access Tokens page.',
+  });
 }
 
 /**
- * PUT /api/mcp/project/title  (API-token auth, owner/admin only)
+ * PUT /api/mcp/project/title  (API-token auth, owner/editor/admin)
  * Body: { title }
  * Renames the token's bound project. Target project = req.apiToken.projectId
  * (never taken from arguments).
@@ -411,7 +401,7 @@ async function updateProjectTitle(req, res, next) {
 }
 
 /**
- * PUT /api/mcp/project/description  (API-token auth, owner/admin only)
+ * PUT /api/mcp/project/description  (API-token auth, owner/editor/admin)
  * Body: { description }
  * Updates the token's bound project description (stored as summary).
  */
@@ -508,7 +498,7 @@ async function addProjectMember(req, res, next) {
 }
 
 /**
- * POST /api/mcp/files  (API-token auth, owner/admin only)
+ * POST /api/mcp/files  (API-token auth, owner/editor/admin)
  * Body: { filename, content? , contentBase64? }
  * Uploads a knowledge file to the token's bound project. Text files (.md/.txt)
  * may be sent as `content`; binary files (.pdf) must be sent as base64 in

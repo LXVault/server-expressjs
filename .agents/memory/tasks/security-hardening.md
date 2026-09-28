@@ -52,6 +52,7 @@ the test is how a check passes without having checked anything.
 | 8 | Derive the key properly | scrypt and a persisted per-row salt | server-expressjs | `fix/encryption-kdf` |  |
 | 9 | Release | `2.0.0`, changelog, this record closed | server-expressjs | `chore/security-hardening-release` |  |
 | 10 | Membership is owner-or-admin on the web path too | `documentController.js`, the docs that said otherwise | server-expressjs | `chore/security-hardening-release` |  |
+| 11 | A project token cannot create a project | `mcpController.js` `createProject`, three stale doc comments | server-expressjs | `fix/mcp-project-creation-scope` |  |
 
 Tasks 2 to 8 stack in this order; each branches from its predecessor. Two further
 chains run in the other repositories, ordered after this one because both read the API
@@ -942,6 +943,64 @@ Two things about those assertions, because both would have read as passes:
   the whole time. What I got wrong was writing "deliberately" over a difference I had not
   investigated — see task 10.
 
+### Task 11 — fix/mcp-project-creation-scope
+
+Raised after task 10 was merged, from a correction to my own reporting rather than from a
+new audit finding. `POST /api/mcp/projects` (`createProject`,
+`src/controllers/mcpController.js:344`) was the only project-mutating MCP handler with no
+authorization call at all — every one of its eight siblings routes through
+`assertProjectWrite` or `assertProjectAdmin`.
+
+**What the defect is, stated correctly.** The first account of it — in the plan, and in the
+body of PR #13, which is now merged and public — called it "owner-equivalent capability and
+the removal half of H4". That is wrong. `createDocument` on the web path
+(`documentController.js:49`) has no role check either, so any signed-in user could already
+create as many projects as they liked, and this endpoint was never an elevation above that.
+Calling it escalation described a hole that does not exist.
+
+The real defect is narrower: **a project token escapes its own scope.** A token is minted
+for one project — that is the whole of its grant, and `req.apiToken.projectId` is the only
+project any other tool in this file may touch. Creating a project is not work scoped to
+that project, so honouring the call let a token for project A mint projects B, C and D. A
+contract the token's own documentation states, and did not keep.
+
+**Decisions:**
+
+* **The refusal is unconditional, and is not written as a role check.** `canWrite` asks
+  "may this user write to this project", and writing to project A does not authorize
+  creating project B. There is no role that answers this question, and picking one would
+  dress a product decision up as an authorization rule. The handler is now two lines and
+  says so in the comment above it.
+* **The reasoning matches the one already accepted for `add_member`.** An `admin` grant
+  belongs in the web app where a human confirms it; so does creating the project those
+  grants are attached to. Both are things a person does, not a token.
+* **The web app is unchanged.** `POST /api/documents` still lets any signed-in user create
+  a project. That is the product's answer, and this removes a second, unattended way to ask
+  the same question — not the ability to ask it.
+* **Removing the MCP tool does not do this.** Anyone holding a token can POST to the
+  endpoint directly, so the guard is server-side and the tool removal in the `mcp`
+  repository is a consequence of it, not a substitute.
+* **The refusal message names the web app**, so the caller is told where to go rather than
+  only that it failed.
+
+**Also here, and it was my miss.** Three JSDoc comments still read "owner/admin only" on
+routes that task 9's `assertProjectWrite` opened to an editor: `mcpController.js:370`,
+`:408` and `:505`. Task 9 changed the behaviour and missed the comments describing it. The
+fourth, `:446` on the members route, is still correct — that one is `canAdminister`.
+
+**Verification.** `t7-harness.js` grew eight assertions to 64, with an `api_tokens` branch
+in the stub and two real tokens — one owner, one viewer. Both are refused with byte-equal
+403s, which is what distinguishes an unconditional refusal from a `canWrite` check that
+happens to refuse a viewer. A counter asserts no `INSERT INTO documents` was issued, and
+`GET /api/mcp/me` with the same token returns 200, so the 403s are the guard and not the
+middleware failing to resolve a principal. All four harnesses pass: 64, 16, 44, 5.
+
+One harness bug found on the way, recorded because it is the recurring failure mode: the
+stub's project-access branch matches on `/member_role/`, and the token query selects
+`dm.role AS member_role`, so the token lookup was answered with a project row and every
+principal resolved to `undefined`. The failure pointed at the controller. It was the stub.
+The api-token branch now has to come first, and says why.
+
 ## Cross-repository follow-up, not done here
 
 `client-reactjs/src/context/AuthContext.jsx` — `logout()` calls `setToken(null)` and
@@ -957,26 +1016,34 @@ is scheduled as `fix/session-hygiene` in that chain, where it belongs.
 
 ## Status
 
-**Complete for this repository.** All ten tasks are done and committed on stacked local
-branches, ending at `chore/security-hardening-release`. The release is `2.0.0`.
+**Merged.** PR **LXVault/server-expressjs#13** is `MERGED` into `master` as `5bca32b`, 14
+commits, 43 files, `MERGEABLE/CLEAN` with no conflicts. `master` carries
+`package.json` version `2.0.0`. The merge gate was opened by the user after they reviewed
+the diff. The body was read back from the forge afterwards and nothing had been appended
+to it.
+
+**Still open at the time of the merge, and now closed as task 11:** the creation hole
+described above, in a branch of its own.
+
+**No tag was created.** A tag on a version that has not shipped would claim a release that
+has not happened, so `2.0.0` is recorded in `package.json` and in
+`wiki/logs/2/0/0/CHANGELOG.md` and nowhere else.
+
+**The 1.1.0 question, settled from git history.** The user asked whether 1.1.0 had been
+released and did not know. The history answers it: `package.json` has read `1.0.0` since
+the first commit on 2026-06-12 and was never advanced, the repository carries no tags at
+all, and the commit that added `wiki/logs/1/1/0/CHANGELOG.md` is `a150c36`, whose own
+subject is "document the embedding matrix and **log** 1.1.0" — not release it. The
+embedding code it describes is genuinely in the tree; the manifest simply never moved.
+
+So an operator reads this upgrade as **1.0.0 to 2.0.0**, not 1.1.0 to 2.0.0, and the 2.0.0
+release note was corrected before the merge to say so. The 1.1.0 log is left as written: it
+records what the code did, and rewriting a dated log to match a manifest would be a version
+claim of its own.
 
 Task 10 was added after task 9, during the release, from a discovery finding rather than
 from the plan. It went into this repository rather than chain 2 because the user's answer
 to the question put the defect on the web path, and the web path is here.
-
-Nothing has been pushed and no pull request has been opened — the user asked to review the
-diff first. Opening and merging the pull request are separate gates and both are still
-closed.
-
-**Update, after the user reviewed the diff.** `chore/security-hardening-release` is pushed
-and in sync with `origin`, and the pull request is open: **LXVault/server-expressjs#13**,
-`Breaking Change: refuse to boot on a published secret, and close the disclosure paths`,
-43 files, +4494/−570 against `master`. It is **merge order 1 of 3** and the body carries that
-line, naming `mcp` and `client-reactjs` as merging after it.
-
-The merge gate is separate and **is still closed.** No tag was created: a tag on a version
-that has not shipped would claim a release that has not happened, so `2.0.0` is recorded in
-`package.json` and in `wiki/logs/2/0/0/CHANGELOG.md` and nowhere else.
 
 Four discovery findings were presented at the end of task 9 rather than self-applied, as
 the protocol requires. The user selected three, and they are committed:
