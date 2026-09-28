@@ -1,15 +1,65 @@
 'use strict';
 
 // Centralised environment configuration.
-// Every value provides a hard-coded fallback so the app boots even when no
-// .env file is present (development convenience).
+//
+// Development keeps a hard-coded fallback for every value, so the app boots with
+// no .env file present. Production does not get that convenience. A process that
+// starts on a published constant is a process signing sessions anyone can forge
+// and decrypting stored API keys anyone can read, so in production it refuses to
+// start instead. See assertProductionSecrets below.
 require('dotenv').config();
+
+// These are published in this repository and in .env.example. That is harmless
+// in development and only ever harmless there, which is why production refuses
+// to boot while any one of them is unset or still in use.
+const PUBLISHED_DEFAULTS = {
+  JWT_SECRET: 'default_jwt_secret_for_development',
+  ENCRYPTION_KEY: 'default_encryption_key_change_me_in_production',
+  DATABASE_URL: 'postgresql://mcp_user:mcp_password@localhost:5432/mcp_rag',
+};
+
+/**
+ * Refuse to start a production process that is running on published values.
+ *
+ * A missing value and a value still set to its published default are the same
+ * failure, and the second is the more likely one, because .env.example is
+ * copy-pasted. Both are rejected.
+ *
+ * @param {string} nodeEnv The resolved NODE_ENV.
+ * @throws {Error} When production is missing a real value for a required key.
+ */
+function assertProductionSecrets(nodeEnv) {
+  if (nodeEnv !== 'production') return;
+
+  const unset = Object.keys(PUBLISHED_DEFAULTS).filter(
+    (key) => !process.env[key]
+  );
+  const defaulted = Object.keys(PUBLISHED_DEFAULTS).filter(
+    (key) => process.env[key] && process.env[key] === PUBLISHED_DEFAULTS[key]
+  );
+
+  if (unset.length || defaulted.length) {
+    const problems = [];
+    if (unset.length) problems.push(`not set: ${unset.join(', ')}`);
+    if (defaulted.length) {
+      problems.push(`still set to the published default: ${defaulted.join(', ')}`);
+    }
+    throw new Error(
+      'Refusing to start in production. The following must be set to real ' +
+        `values in this environment — ${problems.join('; ')}. The defaults in ` +
+        'this repository are public, so a process running on them offers ' +
+        'forgeable sessions and readable stored keys. Generate each with ' +
+        '`openssl rand -hex 32`.'
+    );
+  }
+}
 
 const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT, 10) || 4000,
 
-  // Full connection string is preferred; falls back to a local default.
+  // Full connection string is preferred; falls back to a local default in
+  // development only, which assertProductionSecrets enforces.
   databaseUrl:
     process.env.DATABASE_URL ||
     'postgresql://mcp_user:mcp_password@localhost:5432/mcp_rag',
@@ -20,7 +70,9 @@ const config = {
 
   // Secret used to derive the AES-256 key that encrypts users' OpenRouter API
   // keys at rest. MUST be overridden in production. Any string works — it is
-  // run through a KDF to produce a 32-byte key.
+  // hashed once with SHA-256 to produce the 32-byte key. That is a single fast
+  // pass, not a key derivation function; the scrypt change that makes this true
+  // is tracked in .agents/memory/tasks/security-hardening.md, task 8.
   encryptionKey:
     process.env.ENCRYPTION_KEY || 'default_encryption_key_change_me_in_production',
 
@@ -29,5 +81,7 @@ const config = {
 
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };
+
+assertProductionSecrets(config.nodeEnv);
 
 module.exports = config;

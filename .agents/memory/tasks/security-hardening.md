@@ -64,6 +64,57 @@ Depends on: nothing. Task 2 depends only on this record; tasks 3 to 8 additional
 depend on the guard landing first, because Express 5 changes how the middleware stack
 boots and the guard runs before it.
 
+### Task 2 — fix/fail-closed-secrets
+
+Closes the two CRITICAL findings, C1 and C2.
+
+Landed:
+
+* `src/config/env.js`: `assertProductionSecrets` runs after the config object is built
+  and throws before `module.exports` when `NODE_ENV=production`. It rejects an unset
+  key and a key still holding its published default, and names which is which, because
+  the second is the likelier mistake and the message has to distinguish them. Development
+  is untouched, so the fallbacks still work where they are not dangerous.
+* The three published constants are named in one `PUBLISHED_DEFAULTS` object rather than
+  repeated inline, so the guard and the fallbacks cannot drift apart.
+* The false claim that the encryption key "is run through a KDF" is corrected in both
+  `env.js` and `.env.example`. It is a single SHA-256 pass. The scrypt change that makes
+  the sentence true is task 8; until then the comment says what the code does.
+* `.env.example`: `JWT_SECRET` and `ENCRYPTION_KEY` are blank with a generation command.
+  `DATABASE_URL` keeps its local value because that is a development convenience, but the
+  comment now says production must replace it and why — the role name and password in it
+  are published.
+
+Verified, not by inspection. Six cases run against the real module, each in a child
+process with a clean environment:
+
+* production with nothing set — refuses, naming all three
+* production with `JWT_SECRET` at its published default — refuses, naming it as a
+  default rather than as missing
+* production with all three real — loads
+* production with only `ENCRYPTION_KEY` missing — refuses, naming only that one
+* development with nothing set — loads
+* no `NODE_ENV` at all — loads
+
+The full application was then loaded in development (10 routes mounted) and refused in
+production with the guard's message. `npm ci` left `package-lock.json` untouched.
+
+The first run of this test was invalid and was discarded: `node_modules` was absent, so
+all six cases threw on `require('dotenv')` and three of them passed for the wrong reason.
+The dependency install happened first and the test was re-run. The lesson is recorded here
+because it is the failure mode a security check is least likely to survive — a test that
+passes because the module could not load at all looks exactly like a test that passed.
+
+Checked and deliberately not changed: `src/config/db.js` reads `config.databaseUrl` as
+the only path to a database, so a production deployment that works must already set
+`DATABASE_URL`. Requiring it breaks nothing that currently runs. The `.env.example`
+reference to `docker-compose.yml` describes a file that exists in no repository, and
+`.gitignore` points at a `docker-compose.yml.example` template that is also absent; both
+are pre-existing and are reported as a discovery finding rather than edited here.
+
+Depends on: task 1. Task 3 depends on this guard, because Express 5 changes how the
+middleware stack boots and the guard runs ahead of it.
+
 ## Decisions
 
 * **The guard throws rather than warns.** A process that starts with a defaulted secret
@@ -89,4 +140,4 @@ boots and the guard runs before it.
 
 ## Status
 
-In progress. Task 1 of 9 complete.
+In progress. Tasks 1 and 2 of 9 complete.
