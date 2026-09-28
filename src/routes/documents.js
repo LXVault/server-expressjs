@@ -92,7 +92,12 @@ router.put('/:id/embedding-model', setEmbeddingModel);
 // space held by a model the project no longer uses. Owner/admin only, enforced
 // in the controller. The model segment is a provider-namespaced id, so it
 // contains a slash and needs the wildcard to survive routing.
+//
+// The wildcard form is `*name`. Express 5 uses path-to-regexp v8, which removed
+// the custom-parameter regex `(*)` that Express 4 accepted. The controller
+// rejects an empty match before it reaches SQL, so a wildcard that also matches
+// no segments at all is safe here.
 router.post('/:id/embeddings/backfill', backfillEmbeddings);
-router.delete('/:id/embeddings/:model(*)', deleteModelEmbeddings);
+router.delete('/:id/embeddings/*model', deleteModelEmbeddings);
 
 module.exports = router;
