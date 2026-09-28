@@ -81,14 +81,72 @@ of both being clamped to 60.
 Every one of these rests on `TRUST_PROXY` being right, since it decides whether `req.ip` is
 the client or the proxy. See [env.md](../environments/env.md).
 
+## What the error paths say
+
+An error response is the one place a server talks about itself unprompted, so what it is
+allowed to say is a deliberate decision rather than whatever `err.message` happened to be.
+
+| Class | Response | Example |
+|---|---|---|
+| `4xx` | The message this application wrote | `No OpenRouter API key configured for your account` |
+| `5xx` in production | `Internal Server Error`, nothing else | — |
+| `5xx` in development | The real message | — |
+
+The 4xx branch is safe because the text was authored here, for this caller. The 5xx branch
+is not: a `5xx` message came from node-postgres, an upstream API or a library, and those
+routinely name tables, columns, constraint names, hostnames and failed credentials.
+`duplicate key value violates unique constraint "uq_api_tokens_user_project"` is a free
+map of this schema. It goes to the log, where it is useful to whoever is on call.
+
+Three places needed more than that rule, because they sat on the 4xx side while carrying
+text from elsewhere:
+
+* **`/health`.** A database error there can read `password authentication failed for user
+  "mcp_user"`, which confirms the default credentials published in this repository are live
+  and names the internal address. The endpoint is unauthenticated and the most-read one in
+  the deployment, so it answers `{"status":"degraded"}` and nothing else.
+* **The upload path.** `ingestFile` fails either in this application's own validation or
+  inside the PDF parser or OpenRouter. `describeIngestFailure` in `fileController` maps the
+  status to wording written here; the real message is logged. The `error` field keeps its
+  name, because the web app reads it.
+* **Backfill.** The same reasoning, and the upstream's own message is logged rather than
+  returned.
+
+**Enumeration is a latency problem as much as a message problem.** The sign-in handler used
+to return before `bcrypt.compare` for an account that did not exist, and after it for one
+that did. The two `401`s were byte-identical and differed by roughly a hundredfold in
+latency, which made the generic message a reliable oracle. Both paths now do exactly one
+bcrypt comparison against the same cost factor — against a decoy hash when there is no real
+one. Registration and member-add are bounded the other way, by refusing to repeat the probe
+back and by the rate limits above.
+
 ## Authentication
 
 Two independent paths, never mixed.
+
+Security headers come from `helmet` at the top of the stack, and `X-Powered-By` is
+disabled. CORS is a named allow list rather than a wildcard; see
+[env.md](../environments/env.md).
 
 | Path | Middleware | Populates | Guards |
 |---|---|---|---|
 | Human | `src/middleware/auth.js` | `req.user` | `/api/documents`, `/api/me`, `/api/tokens`, `/api/profile`, `/api/analysis` |
 | Assistant | `src/middleware/apiToken.js` | `req.apiToken` | `/api/mcp` |
+
+A valid signature is necessary but not sufficient. `requireAuth` checks three things,
+because a signed token is only evidence that this server issued it at some point:
+
+1. **It verifies** with `algorithms: ['HS256']` and the expected issuer and audience. Left
+   unpinned, a token chooses its own algorithm.
+2. **The user still exists.** A token for a deleted account used to keep working until it
+   expired, because nothing ever asked.
+3. **The `ver` claim still matches `users.token_version`.** This is what makes logout
+   revoke: the token carries the version it was signed with, and bumping the column retires
+   every outstanding token at once. A stateless JWT cannot otherwise be cancelled — the old
+   remedy was rotating the global signing secret, which signs out everyone.
+
+The cost is one indexed primary-key lookup per authenticated request. That is what buys a
+session that can actually end.
 
 An MCP controller resolves the acting user and the target project from `req.apiToken`
 only. Nothing under `/api/mcp` accepts a project id, a user id, or a role as an argument,
@@ -129,9 +187,10 @@ normal case there. The two differ deliberately, and the table below records whic
 
 | Method and path | Auth | Purpose |
 |---|---|---|
-| `GET /health` | none | Liveness plus a database check. |
+| `GET /health` | none | Liveness plus a database check. Answers only `{"status":"ok"}` or `503 {"status":"degraded"}` — the reason is logged, never returned. |
 | `GET /api/ping` | none | Reachability. |
 | `POST /api/auth/register`, `POST /api/auth/login` | none | Account creation and JWT issue. |
+| `POST /api/auth/logout` | JWT | Bumps the caller's `token_version`, retiring every token signed with the previous value. |
 | `GET /api/profile` | JWT | The current user. |
 | `GET /api/me/openrouter-key`, `PUT`, `DELETE` | JWT | Status, set and remove the caller's OpenRouter key. The key itself is never returned. |
 | `GET /api/documents`, `POST` | JWT | List accessible projects with chunk and file counts; create one. |

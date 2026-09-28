@@ -27,7 +27,7 @@ routes under `/api`. Concepts and vocabulary:
 | `src/routes/` | Path to controller wiring, one file per feature, aggregated by `routes/index.js`. |
 | `src/controllers/` | Validation, authorization and SQL. |
 | `src/utils/` | Logic shared by more than one controller: embeddings, file ingestion, crypto, JWT, audit, user keys, API tokens, roles, document access. |
-| `src/middleware/` | `auth.js` for JWT, `apiToken.js` for per project tokens, `documentAccess.js` for project authorization ahead of the upload parser. |
+| `src/middleware/` | `auth.js` for JWT, `apiToken.js` for per project tokens, `documentAccess.js` for project authorization ahead of the upload parser, `rateLimit.js` for the request budgets. |
 | `db/init.sql` | The one and only schema definition. Idempotent by construction. |
 
 ## Entry points
@@ -117,6 +117,27 @@ exercise the route you changed. Report it that way; do not imply a suite ran.
   the sign-in limiter, so a correct password spends no budget. Turning it off locks out
   anyone who signs in more than ten times correctly in a quarter hour, which includes every
   user of a shared machine.
+* **`requireAuth` is not just a signature check.** It queries `users` on every
+  authenticated request, for two reasons: a token for a deleted user must stop working, and
+  the `ver` claim must still match `token_version` or logout does not revoke. A route that
+  needs a user without the database — none today — would need a different guard, not a
+  shortcut around this one.
+* **Sign-in timing is a security property.** `comparePassword` in `authController` runs
+  exactly one bcrypt comparison whether or not the account exists, against a decoy hash in
+  the absent case. An early `return` before the compare is a working enumeration oracle
+  even though the message is generic, and the two `401`s are byte-identical so a
+  byte-comparison test will not catch it. Time the two paths if you touch that function.
+* **Error text crosses a trust boundary in three places.** The central handler already
+  blanks `5xx` in production, but `/health`, the upload `422` and the backfill `502` sit on
+  the `4xx` side while carrying text from postgres, the PDF parser or OpenRouter. Each has
+  its own reduction — see the error paths section in
+  [`../../../wiki/information/architecture.md`](../../../wiki/information/architecture.md).
+  Do not forward `err.message` from a controller without checking where it came from.
+* **Two guards run at require time in `src/config/env.js`**, before the process can listen:
+  the published-secrets guard and the CORS wildcard guard. Both throw, both only in
+  production. A test that boots the app in-process can only ever exercise one of them, so
+  the boot behaviour is verified in child processes — see
+  [`t7-boot.js`](t7-boot.js).
 
 ## Where things get documented
 

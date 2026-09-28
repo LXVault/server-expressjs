@@ -1,7 +1,8 @@
 'use strict';
 
 const express = require('express');
-const { register, login } = require('../controllers/authController');
+const { register, login, logout } = require('../controllers/authController');
+const { requireAuth } = require('../middleware/auth');
 const { loginLimiter, registerLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
@@ -13,5 +14,10 @@ const router = express.Router();
 // budget. See src/middleware/rateLimit.js.
 router.post('/register', registerLimiter, register);
 router.post('/login', loginLimiter, login);
+
+// Authenticated, unlike the two above: logging out is only meaningful for a
+// session that exists. The handler is idempotent, so a client that calls this
+// on a token it has already discarded still gets a clean answer.
+router.post('/logout', requireAuth, logout);
 
 module.exports = router;

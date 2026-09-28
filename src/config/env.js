@@ -18,6 +18,13 @@ const PUBLISHED_DEFAULTS = {
   DATABASE_URL: 'postgresql://mcp_user:mcp_password@localhost:5432/mcp_rag',
 };
 
+// The only browser origin this application is expected to be called from in
+// development. A default of `*` is a policy nobody chose: it is what you get by
+// not having made a decision, and it survives into production. Naming the
+// development origin makes the decision explicit and gives production a
+// starting point that is not a wildcard.
+const DEFAULT_CORS_ORIGIN = 'http://localhost:5173';
+
 // Proxies in front of this process when TRUST_PROXY is not set. See the note
 // beside `trustProxy` in the config object below.
 const DEFAULT_TRUST_PROXY_HOPS = 1;
@@ -58,6 +65,39 @@ function assertProductionSecrets(nodeEnv) {
   }
 }
 
+/**
+ * Refuse to start a production process whose CORS policy is a wildcard.
+ *
+ * This API authenticates with bearer tokens rather than cookies, so `*` is not
+ * currently exploitable — there is no ambient credential for a hostile page to
+ * ride. It becomes critical the moment either changes: add `credentials: true`
+ * or move the session into a cookie, and a wildcard origin lets any page on the
+ * internet read authenticated responses on a user's behalf. The order of those
+ * two events is not something this repository can enforce, so the wildcard is
+ * made to be a decision rather than an omission.
+ *
+ * @throws {Error} When production would run with CORS_ORIGIN=* unconfirmed.
+ */
+function assertProductionCors(nodeEnv, corsOrigin) {
+  if (nodeEnv !== 'production') return;
+
+  const isWildcard = !corsOrigin || corsOrigin.trim() === '*';
+  if (!isWildcard) return;
+
+  if (String(process.env.ALLOW_ANY_ORIGIN || '').trim().toLowerCase() === 'true') {
+    return;
+  }
+
+  throw new Error(
+    'Refusing to start in production: CORS_ORIGIN is `*`, which lets any ' +
+      'origin read responses from this API. Set CORS_ORIGIN to the frontend ' +
+      'origin (for example https://app.example.com), or set ' +
+      'ALLOW_ANY_ORIGIN=true to accept the wildcard deliberately — for a ' +
+      'deployment that genuinely has no browser client, or that sits behind a ' +
+      'proxy serving the API and the app from one origin.'
+  );
+}
+
 const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT, 10) || 4000,
@@ -83,7 +123,10 @@ const config = {
   // OpenRouter (OpenAI-compatible) embeddings endpoint base URL.
   openrouterBaseUrl: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
 
-  corsOrigin: process.env.CORS_ORIGIN || '*',
+  // The origin the browser client is served from. This is a named allow list
+  // rather than a wildcard, and production refuses to start on a `*` unless
+  // ALLOW_ANY_ORIGIN=true says the wildcard was meant. See assertProductionCors.
+  corsOrigin: process.env.CORS_ORIGIN || DEFAULT_CORS_ORIGIN,
 
   // How many proxies sit in front of this process, for the purpose of trusting
   // `X-Forwarded-For`. Anything that limits requests per IP rests on `req.ip`
@@ -110,5 +153,13 @@ const config = {
 };
 
 assertProductionSecrets(config.nodeEnv);
+assertProductionCors(config.nodeEnv, config.corsOrigin);
 
-module.exports = config;
+module.exports = {
+  ...config,
+  // Named so a test or a harness can build a token this deployment will accept,
+  // without reaching into a module private. Never overridable by the
+  // environment: a token's audience is a property of the code that verifies it.
+  JWT_ISSUER: 'mcp-rag-server',
+  JWT_AUDIENCE: 'mcp-rag-server-api',
+};

@@ -2,7 +2,7 @@
 
 ## Requirements
 
-* Node.js 20 or newer. The container image is built on `node:20-slim`.
+* Node.js 20 or newer. The container image is built on `node:22-slim`.
 * PostgreSQL 14 or newer with the `pgvector` extension available. The schema runs
   `CREATE EXTENSION IF NOT EXISTS vector` on boot, so the extension must be installed on
   the server even though the database does not need it enabled beforehand.
@@ -24,9 +24,11 @@ The server listens on `PORT`, default `4000`. Every variable and its fallback:
 curl localhost:4000/health
 ```
 
-A healthy server answers `{"status":"ok","db":"up"}`. If it answers `db:"down"`, the
-process is running but `DATABASE_URL` is wrong or the database is unreachable; the API
-still serves requests and every database backed route will error.
+A healthy server answers `{"status":"ok"}`. If it answers `503` with
+`{"status":"degraded"}`, the process is running but `DATABASE_URL` is wrong or the database
+is unreachable; the API still serves requests and every database backed route will error.
+The reason is on the server log and nowhere else — this endpoint is unauthenticated, and a
+database error message can name the user, the host and the credentials that failed.
 
 On boot the log shows three lines worth reading:
 
@@ -73,3 +75,15 @@ explanation rather than failing silently.
 
 There is no test suite and no linter in this repository. Verification is manual: boot the
 server and exercise the route you changed.
+
+Two harnesses exist for the work that manual exercise would not catch, and they are worth
+knowing about even though they are not a test suite:
+
+```
+node .agents/wiki/context/t7-harness.js   # over real HTTP, real middleware
+node .agents/wiki/context/t7-boot.js      # boot guards, one child process per case
+```
+
+Both stub the database and nothing else — the application under test is the real one. They
+were written for one task and are not maintained as a regression suite; treat a failure in
+one as a prompt to look, not as a build step.

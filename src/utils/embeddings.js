@@ -119,12 +119,29 @@ async function embedText({ apiKey, model, input }) {
   }
 
   if (!res.ok) {
-    const message =
-      (data && data.error && (data.error.message || data.error)) ||
-      `OpenRouter embeddings request failed (${res.status})`;
-    const err = new Error(String(message));
-    // Surface auth problems clearly so the user knows to fix their key.
-    err.status = res.status === 401 || res.status === 403 ? 401 : 502;
+    // OpenRouter's error body is not forwarded. It is the upstream's wording
+    // and can carry account identifiers, model availability notes and
+    // internal references; a caller of this API has no business reading it, and
+    // a reflected upstream body is a way to probe somebody else's service
+    // through this endpoint. It is logged, whole, for whoever is debugging.
+    console.error(
+      `[embeddings] OpenRouter returned ${res.status} for model ${model}: ${text}`
+    );
+    // A rejected key is a 502 here rather than a 401. The caller of this API is
+    // authenticated; it is OpenRouter that refused, and answering 401 would
+    // tell a signed-in user their session is bad. The distinction is preserved
+    // in the log, not in the status a client sees.
+    const authProblem = res.status === 401 || res.status === 403;
+    const err = new Error(
+      authProblem
+        ? 'OpenRouter rejected your API key. Check the key saved in your profile.'
+        : 'OpenRouter could not generate embeddings for this model.'
+    );
+    err.status = 502;
+    // Distinguishes "fix your key" from "the provider is unhappy" without
+    // exposing the upstream's own explanation. The upload path reports this
+    // rather than the status, which is why it is here and not in the message.
+    err.code = authProblem ? 'UPSTREAM_KEY_REJECTED' : 'UPSTREAM_ERROR';
     throw err;
   }
 

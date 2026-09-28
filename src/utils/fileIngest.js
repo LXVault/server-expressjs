@@ -157,7 +157,12 @@ async function ingestFile({ projectId, userId, apiKey, model, filename, buffer }
   try {
     text = await extractText(buffer, ext);
   } catch (parseErr) {
-    const err = new Error(`Could not read "${filename}": ${parseErr.message}`);
+    // The parser's own message carries byte offsets, object counts and
+    // occasionally a fragment of the file, none of which the caller needs and
+    // some of which describe the internals of a parser fed attacker-controlled
+    // bytes. The real message is logged by whoever handles this error.
+    console.error(`[ingest] "${filename}" could not be parsed: ${parseErr.message}`);
+    const err = new Error(`Could not read "${filename}" as text`);
     err.status = 422;
     throw err;
   }

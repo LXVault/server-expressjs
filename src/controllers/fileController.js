@@ -11,6 +11,39 @@ const NO_KEY_MESSAGE =
   'web app (Profile → OpenRouter API key) before uploading files.';
 
 /**
+ * Reduce an ingestion failure to something safe to hand back.
+ *
+ * Every branch here is a message this repository writes. The underlying error
+ * is logged by the caller and never forwarded, because it may have been written
+ * by the PDF parser or by OpenRouter, and both put things in their error
+ * strings that are not the caller's to read.
+ *
+ * @param {Error & {status?: number}} err
+ * @returns {string}
+ */
+function describeIngestFailure(err) {
+  // Set by src/utils/embeddings.js so a rejected key can be named without
+  // forwarding the upstream's own explanation of why.
+  if (err.code === 'UPSTREAM_KEY_REJECTED') {
+    return 'OpenRouter rejected your API key — check the key in your profile';
+  }
+  switch (err.status) {
+    case 400:
+      return 'the file type or contents are not supported';
+    case 412:
+      return 'your OpenRouter API key is not available';
+    case 413:
+      return 'the file is too large, or produces too many chunks';
+    case 422:
+      return 'the file could not be read as text';
+    case 502:
+      return 'the embedding provider could not be reached';
+    default:
+      return 'the file could not be processed';
+  }
+}
+
+/**
  * GET /api/documents/:id/files (protected)
  * The project's "central index": every source file the knowledge base was built
  * from, with its chunk count. Visible to any member; managing requires canEdit.
@@ -106,16 +139,22 @@ async function uploadFiles(req, res, next) {
           details: { filename: record.filename, chunks: record.chunk_count, model },
         });
       } catch (fileErr) {
-        // Log server-side too — these are swallowed into `failed` otherwise, so
-        // the Render logs would show nothing about why an upload failed.
+        // Logged in full, returned in reduced form. A failure inside ingestFile
+        // can have come from the PDF parser or from OpenRouter, and their
+        // messages carry file offsets, upstream status codes and occasionally
+        // an upstream error body. None of that is the caller's to see, and
+        // echoing it turned this response into a way to read an upstream's
+        // internals. The `error` field keeps its name — the web app reads it —
+        // and now carries this application's own wording.
         console.error(`[upload] "${file.originalname}" failed: ${fileErr.message}`);
-        failed.push({ filename: file.originalname, error: fileErr.message });
+        failed.push({
+          filename: file.originalname,
+          error: describeIngestFailure(fileErr),
+        });
       }
     }
 
     if (uploaded.length === 0) {
-      // Nothing succeeded — surface the actual per-file reasons so the cause
-      // (e.g. an embedding/API-key problem) is visible in the UI, not hidden.
       const reasons = failed.map((f) => `${f.filename}: ${f.error}`).join('; ');
       return res.status(422).json({
         error: `No files could be ingested — ${reasons}`,

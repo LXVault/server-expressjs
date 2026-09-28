@@ -210,7 +210,11 @@ async function addMember(req, res, next) {
     );
     const user = userResult.rows[0];
     if (!user) {
-      return res.status(404).json({ error: `No user found matching "${target}"` });
+      // The message is fixed and does not echo the identifier back. This
+      // endpoint is the one place an authenticated user could otherwise read
+      // the user table one probe at a time, and a response that repeats the
+      // probe confirms the lookup ran.
+      return res.status(404).json({ error: 'No user matches that username or email' });
     }
     if (user.id === access.document.owner_id) {
       return res.status(409).json({ error: 'That user already owns this document' });

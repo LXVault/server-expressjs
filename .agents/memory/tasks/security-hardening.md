@@ -32,7 +32,11 @@ every change to it must be safe to re-run on every boot, so the two column addit
 guarded rather than migrated. The MCP security invariant holds: the acting user and
 project continue to resolve from `req.apiToken` only. No server-owned OpenRouter key is
 introduced. There is no test suite and no linter, so every task below is verified by
-running the server against a pgvector database and exercising the affected route.
+exercising the affected code directly. Tasks 2 to 5 were verified by booting the server
+against a pgvector database and calling the routes by hand. Tasks 6 and 7 were verified by
+scripts under `.agents/wiki/context/` that drive the real app over real HTTP, stubbing only
+`src/config/db` — and those stubs are the standing hazard, because a stub written to answer
+the test is how a check passes without having checked anything.
 
 ## Tasks
 
@@ -498,6 +502,134 @@ that writes chunks and embeddings — has not been run at all.
 
 Depends on: task 4. Task 7 does not depend on this and could have run in either order.
 
+### Task 7 — fix/error-disclosure
+
+Closes M1–M5 and M8–M11. The M6 half of the plan's T7 numbering (the encryption KDF) is
+task 8, deliberately separated, because that one is a breaking schema change and the
+release notes should not carry a KDF rotation and an information-disclosure sweep in the
+same entry.
+
+Landed:
+
+* **M2 — `helmet` and `app.disable('x-powered-by')`.** `X-Powered-By: Express` names the
+  framework and its version to anyone who asks, which is a free input to anyone matching a
+  CVE against it. helmet adds CSP, `frame-ancestors`, `nosniff`, `Referrer-Policy` and
+  HSTS in one call.
+* **M1 — CORS is a named allow list, and a wildcard has to be asked for.** The default
+  moves from `*` to `http://localhost:5173`, and `assertProductionCors` refuses to start a
+  production process on `*` unless `ALLOW_ANY_ORIGIN=true`. The wildcard is not currently
+  exploitable — bearer tokens, no cookies, so no ambient credential for a hostile page to
+  ride — and it becomes critical the moment cookie auth or `credentials: true` is added.
+  That ordering is not something a config file can enforce, so the wildcard becomes a
+  decision instead of an omission.
+* **M3 — `/health` says `{"status":"degraded"}` and nothing else.** A database error there
+  can read `password authentication failed for user "mcp_user"`, which confirms the
+  credentials published in this repository are live and names the internal address. The
+  endpoint is unauthenticated and the most-read one in the deployment. The detail is logged.
+* **M4 — the central handler splits on class, not on message.** A `4xx` keeps the text this
+  application wrote; a `5xx` in production becomes `Internal Server Error` and the detail
+  goes to the log. node-postgres messages name tables, columns, constraint names and failed
+  credentials, and `duplicate key value violates unique constraint
+  "uq_api_tokens_user_project"` is a free map of the schema. Development passes the real
+  message on both, which is what development is for. The branch is on `nodeEnv`, so a
+  deployment cannot turn it off by setting the wrong thing.
+* **M5 — three places needed more than the handler rule,** because they sat on the `4xx`
+  side carrying text written elsewhere:
+  * `describeIngestFailure` in `fileController` maps an ingestion status to wording written
+    here. The real message is logged. The `error` field keeps its **name** — the web app
+    reads `f.error` at `ProjectDetail.jsx:96`, and renaming it would have broken the client
+    to fix a disclosure.
+  * `fileIngest` no longer interpolates `parseErr.message` into its own `422`; a PDF parser
+    error carries byte offsets and file fragments.
+  * `embedText` no longer forwards OpenRouter's error body, and an upstream `401`/`403` is
+    now a `502` here — the caller of this API *is* authenticated, it is OpenRouter that
+    refused, and answering `401` told a signed-in user their session was bad. The
+    auth-versus-provider distinction moved to a `code` the upload path can name without
+    quoting the upstream.
+* **M8 — the sign-in timing oracle is closed.** `!user` used to return before
+  `bcrypt.compare`, so the two `401`s were byte-identical and ~100× apart in latency.
+  `comparePassword` now runs exactly one bcrypt comparison on both paths, against a decoy
+  hash built once per process when there is no real one. Measured after the change: 86.4 ms
+  against 85.4 ms, a ratio of 1.01.
+* **M9 — registration stops naming the constraint.** The unique-violation `409` no longer
+  says which field collided, and never says `users_email_key`. It still differs from a
+  successful `201` in status, which is inherent to a create endpoint — the honest limit of
+  this fix, and the reason the register limiter matters.
+* **M10 — member-add no longer echoes the probe.** The `404` was
+  `No user found matching "<identifier>"`, which confirms to any project owner that the
+  lookup ran. Fixed wording, and the two probe shapes return identical bodies.
+* **M11 — logout is real, and JWT verification is pinned.** `verifyToken` now passes
+  `algorithms: ['HS256']` with an issuer and audience, all three matched on sign. A token
+  signed by the same organisation for a different service no longer verifies here.
+  `users.token_version` (a new column, `DEFAULT 0`, idempotent `ALTER` for older
+  databases) plus a `ver` claim makes `POST /api/auth/logout` revoke every outstanding
+  token at once. `requireAuth` also checks the user still exists, which closes "a token for
+  a deleted user keeps working". The issuer and audience are exported from `config/env.js`
+  as constants that **cannot** be overridden by the environment — a token's audience is a
+  property of the code that verifies it, not a deployment setting.
+
+Verified: **44 assertions over real HTTP** in `.agents/wiki/context/t7-harness.js`, and
+**16 in clean child processes** in `.agents/wiki/context/t7-boot.js`.
+
+Over HTTP, against the real app with a table-aware stubbed pool:
+
+* `X-Powered-By` absent; CSP, `X-Frame-Options`, `nosniff` and `Referrer-Policy` all set.
+* `/health` during a database failure: `503`, body exactly `{"status":"degraded"}`, and no
+  `mcp_user` / `ECONNREFUSED` / `10.0.0.5` anywhere in the response.
+* A `5xx` in production is `Internal Server Error` and nothing else, while a `4xx` keeps
+  `Invalid document id` — the class split, both directions.
+* A token with a foreign issuer, a foreign audience, or `alg: none` is each refused; a
+  correctly signed one is accepted.
+* A token minted **before** `ver` existed carries no claim and still works for a version-0
+  user — adding logout must not sign out everyone on deploy — and is refused for a user who
+  has since bumped past 0. Both directions asserted, because the first alone would pass on
+  a `ver` check that was simply absent.
+* Logout: `204`, one version bump, the token it just retired is then `401`, and a second
+  logout with that same token is `401` at `requireAuth` — which is correct, and which
+  corrected a comment I had written claiming the endpoint was idempotent in a stronger
+  sense than it is.
+* Timing: 8 samples each of absent-account and wrong-password, medians 86.4 ms and 85.4 ms.
+* Registration: taken-username and taken-email `409`s are byte-identical, name no
+  constraint or table, and a genuinely free registration still returns `201`.
+* Member-add: `404` reached — not a `500` from the stub, which is what proves the
+  enumeration branch was entered — with the probe absent and both shapes identical.
+
+In child processes, one case each: production refuses `CORS_ORIGIN=*` and names
+`ALLOW_ANY_ORIGIN`; a named origin boots; `ALLOW_ANY_ORIGIN=true` permits the wildcard; the
+secrets guard still fires and produces *its* message, not the new one's; `TRUST_PROXY`
+across seven values still resolves as task 6 left it; and a spoofed `JWT_ISSUER` in the
+environment is ignored.
+
+**Four of my own harness bugs, all of the kind that manufacture a pass.** Worth writing
+down because three of them initially showed as *failing* assertions on correct code:
+
+* A stub regex written for a column list the middleware does not select, so the row lookup
+  fell through to an empty result and every authenticated request 401'd. The application
+  was right; the stub was wrong, and I nearly "fixed" the middleware to match it.
+* A second stub branch, added to make member-add reachable, matched `is_owner` and so also
+  swallowed the `documents` listing — breaking the `5xx` test it had nothing to do with.
+  Each fix for one test broke another, which is the signature of a harness keyed on
+  incidental text.
+* `/SELECT .* FROM documents/` never matched, because `.` does not cross a newline and
+  every query here is multi-line. That one was the dangerous direction: it made the leaky
+  error unreachable, so the M4 assertions would have "passed" against a stub that never
+  threw. It is now `[\s\S]*`, and the comment says why.
+* Two stale expectations, not code faults: a claim-less token signed for the owner (version
+  3) which correctly failed against version 0, and `TRUST_PROXY=""` which now correctly
+  resolves to the default of `1` rather than `null` after your answer about Render.
+
+The general lesson is the one from tasks 2 and 6 and it has now cost me four times: **a
+stub that answers the test is worse than no stub.** A vacuous pass is invisible where a
+failure is loud.
+
+**Not verified, and this is a real gap.** Still no PostgreSQL and no Docker, so everything
+DB-backed runs against a stub. Specifically unexercised: that `ALTER TABLE users ADD COLUMN
+IF NOT EXISTS token_version` actually applies on a live database, and that
+`token_version = token_version + 1` behaves under concurrent logout. Both should be
+exercised once against a real pgvector instance before this ships.
+
+Depends on: task 5.
+
 ## Decisions
 
 * **The guard throws rather than warns.** A process that starts with a defaulted secret
@@ -552,8 +684,51 @@ Depends on: task 4. Task 7 does not depend on this and could have run in either 
   installed.
 * **Size limits are `413`, not `400`.** A well-formed request that is too big is a
   different failure from a malformed one, and a client retrying a 400 will not help.
+* **A CORS wildcard is a decision, not a default.** `*` is not exploitable today — bearer
+  tokens, no cookies, nothing for a hostile page to ride — and it becomes critical the
+  moment cookie auth or `credentials: true` is added. Which of those two happens first is
+  not something a config file can enforce, so the wildcard has to be asked for by name
+  (`ALLOW_ANY_ORIGIN=true`) and production refuses to boot without it. Blocking on a risk
+  that is not live yet would be the other kind of wrong; so would leaving it silent.
+* **The error handler branches on class, not on message.** A `4xx` is text this
+  application wrote for this caller and is safe to return; a `5xx` came from node-postgres,
+  an upstream or a library and is not. Branching on the message would mean trusting every
+  string that ever reaches the handler, including ones a dependency invents next year. The
+  branch is on `nodeEnv`, so a deployment cannot switch it off by setting the wrong thing.
+* **`requireAuth` costs a database lookup on every authenticated request, and that is the
+  price of a session that can end.** Statelessness bought the sign-out button nobody had
+  and cost a token that survived its own user's account. The lookup is one indexed primary
+  key hit; a cached revocation list would be faster and would be another thing to keep
+  consistent with the database, which is the class of bug this task exists to remove.
+* **The KDF change is task 8, not part of task 7.** They are both "hardening" in the loose
+  sense and they are unrelated work: one changes what a response may say, the other
+  changes a stored ciphertext's compatibility. Sharing a commit would make the release note
+  claim both at once and put a breaking schema change in the same review as a diff nobody
+  can revert cleanly.
+* **A comment that the harness disproved was corrected rather than the code.** `logout`
+  said it was idempotent; it is not — a second logout with the retired token is a `401` at
+  `requireAuth`, and that is the right answer. The comment now says what the code does. A
+  test that fails against correct code is usually the test that is wrong, and the honest
+  response is to find out which it is rather than to make the assertion pass.
+* **`X-Powered-By` is off and helmet is on** — recorded as a decision rather than a
+  preference, because "we already have a framework that could do this" is a real argument
+  and the answer is that hand-maintaining a header set is how they go stale.
+
+## Cross-repository follow-up, not done here
+
+`client-reactjs/src/context/AuthContext.jsx` — `logout()` calls `setToken(null)` and
+nothing else. It never contacts the API, so the token the browser still holds in
+localStorage stays valid server-side until it expires, and the `POST /api/auth/logout` this
+task added is unreachable from the web app. Signing out has to call the endpoint and only
+then clear local state.
+
+Not fixed here on purpose. This workspace's rule is that a change spanning repositories is
+more than one work task, each with its own branch, commits and pull request, ordered rather
+than stacked — and `client-reactjs` is chain 3 of 3, behind its own dependency upgrade. It
+is scheduled as `fix/session-hygiene` in that chain, where it belongs.
 
 ## Status
 
-In progress. Tasks 1 to 6 of 9 complete. Task 7 (error disclosure and hardening) is next;
-task 8 (the encryption KDF) and task 9 (the release) follow it.
+In progress. Tasks 1 to 7 of 9 complete. Task 8 (the encryption KDF, a breaking schema
+change) is next; task 9 (the release) follows it. Two of the nine are in the other two
+repositories of this workspace, on their own chains and their own merge order.
