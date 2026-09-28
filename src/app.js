@@ -7,6 +7,16 @@ const { healthCheck } = require('./config/db');
 
 const app = express();
 
+// Only enable this when the app really does sit behind exactly one proxy that
+// overwrites `X-Forwarded-For`. It is what makes `req.ip` the client rather than
+// the proxy, which any rate limiter keyed on IP depends on. Set it too high and
+// a client can forge the header and walk straight through the limit; leave it
+// unset when there is no proxy and every request appears to come from the proxy
+// itself, which is safe but lumps all callers into one bucket. Unset by default.
+if (config.trustProxy !== null) {
+  app.set('trust proxy', config.trustProxy);
+}
+
 // Build a forgiving CORS policy from CORS_ORIGIN.
 //   - unset or '*'  -> reflect any origin (the app uses bearer tokens, not
 //     cookies, so this is safe and avoids deploy-time friction)
@@ -32,10 +42,16 @@ function buildCorsOptions(raw) {
 
 // --- Essential middleware ---
 app.use(cors(buildCorsOptions(config.corsOrigin)));
-// Raised from the 100kb default so base64-encoded file uploads via the MCP
-// endpoint (/api/mcp/files) fit. Multipart web uploads bypass this (multer).
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ extended: true }));
+
+// The MCP file endpoint carries a whole file as base64 in a JSON field, so it
+// needs a body far larger than anything else the API accepts. It gets its own
+// parser, mounted BEFORE the global one: body-parser marks the stream as read
+// and a second parser skips it, so whichever runs first is the one that counts.
+// Every other route therefore gets the small limit, which is what stops one
+// request from parking 20 MB of JSON in memory.
+app.use('/api/mcp/files', express.json({ limit: '20mb' }));
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
 // --- Health check ---
 app.get('/health', async (req, res) => {

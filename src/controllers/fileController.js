@@ -1,45 +1,14 @@
 'use strict';
 
 const db = require('../config/db');
-const { canWrite } = require('../utils/roles');
 const { recordAudit } = require('../utils/audit');
 const { ingestFile, ALLOWED_EXTENSIONS } = require('../utils/fileIngest');
 const { getDecryptedOpenRouterKey } = require('../utils/userKeys');
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function isUuid(value) {
-  return typeof value === 'string' && UUID_RE.test(value);
-}
+const { isUuid, loadAccess } = require('../utils/documentAccess');
 
 const NO_KEY_MESSAGE =
   'No OpenRouter API key configured for your account. Add your own key in the ' +
   'web app (Profile → OpenRouter API key) before uploading files.';
-
-/**
- * Resolve a document and the caller's relationship to it.
- * `canEdit` is true for the owner, or a member with the 'editor' or 'admin'
- * role — the roles permitted to upload or delete knowledge files. See
- * src/utils/roles.js for the hierarchy.
- */
-async function loadAccess(documentId, userId) {
-  const { rows } = await db.query(
-    `SELECT d.id,
-            d.owner_id,
-            d.embedding_model,
-            (d.owner_id = $2) AS is_owner,
-            (SELECT dm.role FROM document_members dm
-              WHERE dm.document_id = d.id AND dm.user_id = $2) AS member_role
-     FROM documents d
-     WHERE d.id = $1`,
-    [documentId, userId]
-  );
-  if (!rows[0]) return null;
-  const { is_owner: isOwner, member_role: memberRole, ...document } = rows[0];
-  const isMember = Boolean(memberRole);
-  const canEdit = canWrite(isOwner, memberRole);
-  return { document, isOwner, isMember, memberRole, canEdit };
-}
 
 /**
  * GET /api/documents/:id/files (protected)
@@ -88,11 +57,15 @@ async function uploadFiles(req, res, next) {
     const { id } = req.params;
     if (!isUuid(id)) return res.status(400).json({ error: 'Invalid document id' });
 
-    const access = await loadAccess(id, req.user.id);
+    // `requireDocumentWrite` has already resolved and checked this, before
+    // multer was allowed to buffer anything. Reuse its result rather than
+    // repeating the query; fall back to a fresh lookup if the controller is
+    // ever reached without the middleware in front of it.
+    const access = req.documentAccess || (await loadAccess(id, req.user.id));
     if (!access) return res.status(404).json({ error: 'Document not found' });
     if (!access.canEdit) {
       return res.status(403).json({
-        error: 'Only the project owner or an admin can upload files',
+        error: 'Only the project owner, or an editor or admin, can upload files',
       });
     }
 

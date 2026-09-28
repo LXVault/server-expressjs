@@ -13,6 +13,12 @@ const EMBEDDING_MODELS = [
 
 const DEFAULT_EMBEDDING_MODEL = 'openai/text-embedding-3-small';
 
+// Deadline on a single call to OpenRouter. `fetch` with no signal waits forever,
+// so a hung or slow upstream holds the request — and, during ingestion, a pooled
+// database connection is not yet held, but the caller's HTTP slot certainly is.
+// Thirty seconds is well beyond a normal embeddings call.
+const EMBEDDING_TIMEOUT_MS = 30_000;
+
 // A model id is a provider-namespaced slug, e.g. "openai/text-embedding-3-small".
 // We still validate the shape so junk/oversized strings can't be stored or sent.
 const MODEL_ID_RE = /^[A-Za-z0-9._/:-]{1,100}$/;
@@ -89,9 +95,17 @@ async function embedText({ apiKey, model, input }) {
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({ model, input }),
+      signal: AbortSignal.timeout(EMBEDDING_TIMEOUT_MS),
     });
   } catch (networkErr) {
-    const err = new Error(`Could not reach OpenRouter: ${networkErr.message}`);
+    // A timeout is not "could not reach OpenRouter" and reads as one to whoever
+    // sees the error, so it is named for what it was.
+    const timedOut = networkErr.name === 'TimeoutError';
+    const err = new Error(
+      timedOut
+        ? `OpenRouter did not respond within ${EMBEDDING_TIMEOUT_MS}ms`
+        : `Could not reach OpenRouter: ${networkErr.message}`
+    );
     err.status = 502;
     throw err;
   }
@@ -131,6 +145,7 @@ function toVectorLiteral(vector) {
 module.exports = {
   EMBEDDING_MODELS,
   DEFAULT_EMBEDDING_MODEL,
+  EMBEDDING_TIMEOUT_MS,
   isValidModelId,
   isConventionalModelId,
   normalizeModelName,

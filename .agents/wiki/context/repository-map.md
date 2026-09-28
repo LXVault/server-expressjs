@@ -26,8 +26,8 @@ routes under `/api`. Concepts and vocabulary:
 | `src/config/migrate.js` | Reads `db/init.sql` and applies it on boot unless `AUTO_MIGRATE=false`. |
 | `src/routes/` | Path to controller wiring, one file per feature, aggregated by `routes/index.js`. |
 | `src/controllers/` | Validation, authorization and SQL. |
-| `src/utils/` | Logic shared by more than one controller: embeddings, file ingestion, crypto, JWT, audit, user keys, API tokens, roles. |
-| `src/middleware/` | `auth.js` for JWT, `apiToken.js` for per project tokens. |
+| `src/utils/` | Logic shared by more than one controller: embeddings, file ingestion, crypto, JWT, audit, user keys, API tokens, roles, document access. |
+| `src/middleware/` | `auth.js` for JWT, `apiToken.js` for per project tokens, `documentAccess.js` for project authorization ahead of the upload parser. |
 | `db/init.sql` | The one and only schema definition. Idempotent by construction. |
 
 ## Entry points
@@ -86,6 +86,25 @@ exercise the route you changed. Report it that way; do not imply a suite ran.
   reachable.
 * **The whole schema is sent through the simple query protocol** in one `pool.query(sql)`,
   so `db/init.sql` must contain no bind parameters.
+* **Middleware order on the upload route is load-bearing.** `requireDocumentWrite` must
+  stay ahead of `handleUpload` on `POST /api/documents/:id/files`. `multer` buffers into
+  memory, so authorizing after it means the caller has already made the process hold the
+  whole upload. This is easy to "tidy up" and silently reintroduces a 200 MB allocation by
+  an unauthorized caller.
+* **There is one access query, in `src/utils/documentAccess.js`.** It used to be copied
+  into both document and file controllers. The upload middleware needs it too, so a third
+  copy is the failure mode; add a controller to the existing helper instead.
+* **An upload is bounded by chunk count, not just byte size.** `MAX_FILE_BYTES` caps the
+  input but not the work: 10 MB of dense text is roughly 11,000 chunks and one embedding
+  call each. `MAX_CHUNKS_PER_FILE` in `fileIngest.js` is the check that matters, and it
+  must stay *before* the embedding loop — that ordering is the whole point.
+* **`TRUST_PROXY` is a number, never `true`.** It decides whether `X-Forwarded-For` is
+  believed, and anything limiting requests per IP rests on `req.ip` being the client.
+  `true` trusts the last hop, which is the caller. Unset is the safe default; a positive
+  integer is the count of proxies in front of the app.
+* **A multer limit is a `413`, not a `400`.** `LIMIT_STATUS` in `src/routes/documents.js`
+  maps each `LIMIT_*` code to the status it deserves. Adding a limit without a row there
+  silently degrades it to 400.
 
 ## Where things get documented
 

@@ -4,10 +4,11 @@
 
 ```
 src/index.js          boot: listen, health check, apply schema, graceful shutdown
-  src/app.js          CORS, JSON body limit (20mb), /health, mount /api, 404, error handler
+  src/app.js          CORS, JSON body limit, /health, mount /api, 404, error handler
     src/routes/       path to controller wiring, one file per feature
+      src/middleware/   auth (JWT), apiToken (per project), documentAccess
       src/controllers/  validation, authorization, SQL
-        src/utils/      shared logic: embeddings, ingestion, crypto, jwt, audit
+        src/utils/      shared logic: embeddings, ingestion, crypto, jwt, audit, roles
           src/config/db.js   the pg pool
 ```
 
@@ -26,6 +27,34 @@ forwards unexpected errors to the central handler in `src/app.js`.
 **Utils** hold anything two controllers need. `src/utils/fileIngest.js` is the worked
 example: the web upload path and the MCP upload path both call `ingestFile`, so the two
 behave identically rather than drifting.
+
+## What one request can cost
+
+Every limit here bounds a single request, and each one exists because the thing it
+bounds is unbounded by default. They are deliberately separate limits rather than one
+"max request size", because they protect against different things.
+
+| Bound | Value | Why |
+|---|---|---|
+| JSON body | 100 KB | The MCP file endpoint is the only route that needs more, and it has its own 20 MB parser mounted ahead of this one. |
+| Files per upload | 20 × 10 MB | What one request may buffer in memory. |
+| Text fields per upload | 10 | A multipart body with a thousand small fields trips neither `fileSize` nor `files`. |
+| Parts per upload | 30 | Fields and files together. |
+| Bytes per text field | 64 KB | One field can otherwise carry as much as a small file. |
+| Header pairs per part | 2000 | Parser-level, before anything is interpreted. |
+| Chunks per file | 2000 | Each chunk is one sequential OpenRouter call. This is the bound that turns an 11,000-call upload into a `413`. |
+| OpenRouter call | 30 s | `fetch` waits forever without a signal. |
+| PDF parse | 15 s | Parsing is CPU work on an attacker-supplied buffer. |
+
+A file that trips the size limit is `413`, not `400`: the request was well-formed and
+simply too big, and the two are different signals to a client.
+
+**Authorization runs before the upload is read.** `multer` can only buffer once the
+request stream has been consumed, so `requireDocumentWrite` is mounted ahead of it on
+`POST /api/documents/:id/files`. Without that ordering a caller with no access to a
+project has already made the process allocate the whole upload by the time it is
+refused. `src/middleware/documentAccess.js` does the check and hands the result to the
+controller, so the query runs once.
 
 ## Authentication
 

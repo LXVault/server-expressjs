@@ -332,6 +332,124 @@ It is reported with the rest.
 
 Depends on: task 4. Task 6 does not depend on this and could have run in either order.
 
+### Task 6 — fix/request-limits
+
+Closes H5 and H6, and the request-limits half of M7, M13 and M14. **This task is not
+finished — rate limiting is not landed.** See "Outstanding" at the end of this entry.
+
+Landed:
+
+* **Authorization moved ahead of the upload parser.** `POST /api/documents/:id/files` now
+  runs `requireDocumentWrite` before `handleUpload`. This is the H5 fix and it is an
+  ordering change, not a logic one: `multer` can only buffer once the request stream has
+  been consumed, so with the check after it, a caller with no access to a project had
+  already made the process allocate up to 200 MB before being refused.
+* `src/middleware/documentAccess.js`, new. Resolves the caller's standing on the project
+  once and hands it to the controller on `req.documentAccess`, so the query is not
+  repeated.
+* `src/utils/documentAccess.js`, new. `loadAccess` existed in **two** copies —
+  `documentController` selected `d.*` and `fileController` selected three columns — and
+  the new middleware would have needed a third. They differ only in the SELECT and
+  `fileController` reads a single field from it, so they are now one function. The
+  controller keeps its own check as a fallback rather than trusting the middleware, since
+  the controller is what decides what a file may do.
+* **Multer bounds the shape of the body, not just its size.** Added `fields: 10`,
+  `parts: 30`, `fieldSize: 64 KB`, `headerPairs: 2000` alongside the existing `fileSize`
+  and `files`. Neither of the old two bounds a request made of a thousand small fields or
+  one field carrying a header the size of a small file.
+* **A limit that was hit is a `413`, not a `400`.** `LIMIT_STATUS` maps each `LIMIT_*`
+  code to the status it deserves; before, every multer error was flattened to 400, so a
+  client could not tell "too big" from "malformed".
+* **The 20 MB JSON limit is now scoped to the one route that needs it.**
+  `/api/mcp/files` gets its own parser mounted *ahead of* the global one, because
+  body-parser marks a stream as read and the second parser skips it — so whichever runs
+  first is the one that counts. Every other route is now capped at 100 KB. This is the
+  cheapest fix in the task: one line of ordering turns a global 20 MB into a single-route
+  20 MB.
+* `MAX_CHUNKS_PER_FILE = 2000` in `fileIngest.js`, checked **before** the embedding loop.
+  This is the highest-value line in the task. `MAX_FILE_BYTES` bounded the input but not
+  the work: 10 MB of dense text is roughly 11,000 chunks, embedded one at a time,
+  sequentially, spending the caller's credits. 2000 is a judgement call and not a measured
+  value — it is about a 2 MB text file or a 300-page PDF. It is flagged here as a product
+  decision, exactly as the plan flagged it.
+* `AbortSignal.timeout(30_000)` on the OpenRouter call. `fetch` with no signal waits
+  forever. A `TimeoutError` is reported as a timeout rather than as "could not reach
+  OpenRouter", because those are different faults and the message is what an operator
+  reads.
+* A 15 s deadline on `parser.getText()`, raced against the parse, with `parser.destroy()`
+  in the `finally` and the timer cleared so the handle does not outlive the request.
+  `pdf-parse` exposes no way to cancel an in-flight parse, so the parse may run on in the
+  background after the request is released; that is the trade for not holding the slot
+  open indefinitely.
+* `TRUST_PROXY` in `env.js` and `.env.example`, and the `app.set('trust proxy', …)` it
+  drives. **The plan said to set this only if the deployment sits behind exactly one
+  proxy you control, and I cannot know that from the repository**, so it is a variable
+  rather than a constant. Unset is the default and the safe reading. `true` is rejected
+  outright: it trusts the whole chain, which means trusting whatever the last hop wrote,
+  and the last hop is the client. **This needs a decision at deploy time** — see
+  Outstanding.
+
+Verified, not by inspection. Thirty assertions against the real application:
+
+* The upload route's layer order, read from the actual router rather than asserted from
+  memory: `requireDocumentWrite` is present, sits ahead of `handleUpload`, and appears on
+  no other route.
+* The real `handleUpload` instance, lifted out of that router and mounted on a probe
+  alongside the real middleware. A non-member posting a 5 KB file is refused 403 and
+  **multer never ran**; the same request as an editor is buffered and answers 200.
+* Multer's shape limits, with multipart bodies built by hand: 9 text fields accepted, 11
+  rejected 413; 20 files accepted, 21 rejected 413; a 70 KB text field rejected 413.
+* JSON limits over HTTP against the booted app: 300 KB refused 413 on `/api/documents`;
+  a small body parsed and then refused 401 for auth; **the same 300 KB accepted on
+  `/api/mcp/files`**, which is what proves the scoping works rather than the limit simply
+  being lower.
+* The chunk cap: a 2 MB text produces 2223 chunks, is under `MAX_FILE_BYTES` so only the
+  chunk cap can stop it, and ingesting it is refused 413 with a message saying what to do
+  — and **no upstream call was made**. A short file passes the cap, reaches the embedding
+  call, and fails later on the absent database, which is what shows the cap is not a
+  blanket rejection.
+* `TRUST_PROXY` across nine values in clean child processes: unset, `0`, `-1`, `true`,
+  `abc` and `3 ` all resolve to `null`; `1` and `2` resolve to those numbers. The
+  production secrets guard still fires after the edit.
+
+**Three of my own harnesses were wrong before the code was, and all three are the kind
+that produce false confidence.** The first stubbed `global.fetch` globally and so
+answered the harness's *own* HTTP requests with an embeddings response — a screen of
+unfailing 200s. The second rebuilt the upload middleware instead of using the
+application's, with a hardcoded 400, so the limit tests "passed" while proving nothing
+about the status codes actually returned. Both are now caught by the fact that the
+harness reuses the real modules. A third, in the task-5 run, made real calls to the live
+OpenRouter API with a fake key and reported its 401 as if the application had produced it.
+The lesson is the same one as the invalid dependency test in task 2: **a stub that
+answers the test is worse than no stub**, because it converts a missing check into a
+passing one.
+
+**Not verified, and this is a real gap.** Still no PostgreSQL and no Docker, so
+everything above runs against a stubbed pool. The middleware ordering, the multer limits
+and the JSON scoping are exercised over real HTTP and do not depend on the database; the
+chunk cap is a pure function and is not. `ingestFile`'s database half — the transaction
+that writes chunks and embeddings — has not been run at all.
+
+### Outstanding on this task
+
+* **Rate limiting is not landed.** It needs `express-rate-limit`, and the install was
+  refused by the environment's permission classifier, which requires the user to approve
+  the package explicitly. Nothing else in the task depends on it. The plan calls for a
+  global `/api` limiter at 60/min plus a stricter login limiter keyed on IP and email
+  with `skipSuccessfulRequests: true`; `TRUST_PROXY` above is the prerequisite for the
+  first of those being meaningful.
+* **`TRUST_PROXY` needs a deploy-time answer**, not a code change. Render puts the app
+  behind one proxy, which would make `1` correct, but that is an assumption about a
+  deployment this repository does not describe.
+* **`files: 20` was left alone, and it is a residual risk.** With authorization in front
+  of it, 200 MB is now reachable only by someone who genuinely has write access — but
+  still by them, and a member could fire several such requests at once. Lowering the file
+  count is a product decision the plan did not ask for, so it is flagged rather than
+  changed. It is the same class of decision as the chunk cap, and I would rather it be
+  made once, deliberately, than twice by accident.
+
+Depends on: task 4. Task 7 does not depend on this and could have run in either order.
+
 ## Decisions
 
 * **The guard throws rather than warns.** A process that starts with a defaulted secret
@@ -365,7 +483,17 @@ Depends on: task 4. Task 6 does not depend on this and could have run in either 
 * **Removal and revocation are both kept.** The middleware join is what makes a removal
   take effect immediately; the explicit deactivation in `removeMember` is what stops the
   token returning if the same person is re-added later. Neither alone is the fix.
+* **`TRUST_PROXY` is a variable, not a constant, and `true` is refused.** The plan said to
+  set it only behind exactly one proxy you control, which is a fact about a deployment
+  this repository does not describe. Encoding a guess as a constant would have made a
+  limiter either bypassable or useless, and the mistake would not have shown up until
+  someone was rate-limited by a forged header. `true` is rejected rather than supported,
+  because the only deployment it is right for is one where the client is not the last
+  hop.
+* **Size limits are `413`, not `400`.** A well-formed request that is too big is a
+  different failure from a malformed one, and a client retrying a 400 will not help.
 
 ## Status
 
-In progress. Tasks 1 to 5 of 9 complete.
+In progress. Tasks 1 to 5 of 9 complete; task 6 is landed except for rate limiting,
+which is blocked on the user approving one dependency.

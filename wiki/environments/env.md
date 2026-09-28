@@ -25,11 +25,28 @@ the likelier mistake and produces the same failure.
 | `ENCRYPTION_KEY` | `default_encryption_key_change_me_in_production` | Run through SHA-256 to derive the AES-256-GCM key that encrypts users' OpenRouter keys. **Required in production.** Rotating it makes every stored key undecryptable. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Base URL for the OpenAI compatible embeddings endpoint. |
 | `CORS_ORIGIN` | `*` | Either `*` to reflect any origin, or a comma separated allow list. Trailing slashes are stripped before comparison, so `https://app.com/` and `https://app.com` both match. |
+| `TRUST_PROXY` | unset | How many proxies sit in front of the process, so `req.ip` is the client rather than the proxy. A number only; `true` is rejected on purpose. See below. |
 | `AUTO_MIGRATE` | unset | Set to the string `false` to stop `db/init.sql` being applied on boot. Any other value, including unset, applies it. |
 | `PG_POOL_MAX` | `10` | Maximum pooled connections. Read directly in `src/config/db.js`. |
 | `PG_IDLE_TIMEOUT` | `30000` | Idle client timeout in milliseconds. Read directly in `src/config/db.js`. |
 
 ## Notes
+
+**`TRUST_PROXY` is the setting most easily got wrong.** It controls whether Express
+believes `X-Forwarded-For`, and anything that limits requests per IP depends on
+`req.ip` being the client.
+
+* **Unset** (the default) — `req.ip` is the connecting peer. If nothing proxies the
+  app this is correct. If a proxy does, every caller shares one bucket, which is
+  inconvenient but not exploitable.
+* **A positive number** — trust that many hops. Set it to the exact number of proxies
+  in front of the app, which for a single Render or nginx hop is `1`.
+* **`true` is refused.** It trusts the whole chain, which means trusting whatever the
+  last hop wrote, and the last hop is the client. That hands anyone a working bypass
+  of any per-IP limit by editing a header.
+
+Set this to match the deployment. Too high and limits can be forged; too low and one
+noisy client can exhaust the budget for everyone.
 
 **`CORS_ORIGIN=*` is deliberate, not an oversight.** The API authenticates with bearer
 tokens rather than cookies, so reflecting the origin does not expose a session to a hostile

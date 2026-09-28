@@ -1,37 +1,9 @@
 'use strict';
 
 const db = require('../config/db');
-const { canWrite } = require('../utils/roles');
+const { isUuid, loadAccess } = require('../utils/documentAccess');
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_ROLES = ['editor', 'viewer', 'admin'];
-
-function isUuid(value) {
-  return typeof value === 'string' && UUID_RE.test(value);
-}
-
-/**
- * Fetch a document and the caller's relationship to it.
- * Returns { document, isOwner, isMember, memberRole, canEdit } or null.
- * `canEdit` is true for the owner, or a member with the 'editor' or 'admin'
- * role. See src/utils/roles.js for the hierarchy.
- */
-async function loadAccess(documentId, userId) {
-  const { rows } = await db.query(
-    `SELECT d.*,
-            (d.owner_id = $2) AS is_owner,
-            (SELECT dm.role FROM document_members dm
-              WHERE dm.document_id = d.id AND dm.user_id = $2) AS member_role
-     FROM documents d
-     WHERE d.id = $1`,
-    [documentId, userId]
-  );
-  if (!rows[0]) return null;
-  const { is_owner: isOwner, member_role: memberRole, ...document } = rows[0];
-  const isMember = Boolean(memberRole);
-  const canEdit = canWrite(isOwner, memberRole);
-  return { document, isOwner, isMember, memberRole, canEdit };
-}
 
 /**
  * GET /api/documents (protected)

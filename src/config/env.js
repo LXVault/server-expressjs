@@ -80,6 +80,20 @@ const config = {
   openrouterBaseUrl: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
 
   corsOrigin: process.env.CORS_ORIGIN || '*',
+
+  // How many proxies sit in front of this process, for the purpose of trusting
+  // `X-Forwarded-For`. `null` means "do not set it at all", which is the default
+  // and the safe one: without it `req.ip` is the connecting peer, so a limiter
+  // keyed on IP cannot be walked around with a forged header. Set it to a
+  // number only when a proxy you control overwrites that header on the way in.
+  // `true` (trust the whole chain) is deliberately not supported — it means
+  // trusting whatever the last hop wrote, which is the client.
+  trustProxy: (() => {
+    const raw = (process.env.TRUST_PROXY || '').trim();
+    if (!raw) return null;
+    const hops = parseInt(raw, 10);
+    return Number.isFinite(hops) && hops > 0 ? hops : null;
+  })(),
 };
 
 assertProductionSecrets(config.nodeEnv);
