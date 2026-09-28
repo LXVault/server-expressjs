@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../config/db');
+const { canAdminister } = require('../utils/roles');
 const { pool } = db;
 const { recordAudit } = require('../utils/audit');
 const {
@@ -31,7 +32,9 @@ function isUuid(value) {
 
 /**
  * Load a project plus the caller's configuration rights.
- * Only the owner or a member with the 'admin' role may change the model.
+ * Only the owner or a member with the 'admin' role may change the model. Model
+ * configuration is administration, not writing, so 'editor' does not reach it —
+ * see src/utils/roles.js.
  * @returns {Promise<{project: Object, canConfigure: boolean, hasAccess: boolean}|null>}
  */
 async function loadModelAccess(projectId, userId) {
@@ -48,7 +51,7 @@ async function loadModelAccess(projectId, userId) {
   );
   if (!rows[0]) return null;
   const { is_owner: isOwner, member_role: memberRole, ...project } = rows[0];
-  const canConfigure = isOwner || memberRole === 'admin';
+  const canConfigure = canAdminister(isOwner, memberRole);
   const hasAccess = isOwner || Boolean(memberRole);
   return { project, canConfigure, hasAccess };
 }

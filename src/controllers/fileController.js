@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../config/db');
+const { canWrite } = require('../utils/roles');
 const { recordAudit } = require('../utils/audit');
 const { ingestFile, ALLOWED_EXTENSIONS } = require('../utils/fileIngest');
 const { getDecryptedOpenRouterKey } = require('../utils/userKeys');
@@ -17,8 +18,9 @@ const NO_KEY_MESSAGE =
 
 /**
  * Resolve a document and the caller's relationship to it.
- * `canEdit` is true for the owner or a member with the 'admin' role — the only
- * roles permitted to upload or delete knowledge files.
+ * `canEdit` is true for the owner, or a member with the 'editor' or 'admin'
+ * role — the roles permitted to upload or delete knowledge files. See
+ * src/utils/roles.js for the hierarchy.
  */
 async function loadAccess(documentId, userId) {
   const { rows } = await db.query(
@@ -35,7 +37,7 @@ async function loadAccess(documentId, userId) {
   if (!rows[0]) return null;
   const { is_owner: isOwner, member_role: memberRole, ...document } = rows[0];
   const isMember = Boolean(memberRole);
-  const canEdit = isOwner || memberRole === 'admin';
+  const canEdit = canWrite(isOwner, memberRole);
   return { document, isOwner, isMember, memberRole, canEdit };
 }
 

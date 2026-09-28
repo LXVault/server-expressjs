@@ -41,7 +41,7 @@ running the server against a pgvector database and exercising the affected route
 | 1 | The record | The confirmed list and its decisions | server-expressjs | `chore/security-hardening-plan` |  |
 | 2 | Refuse to boot on a missing or defaulted secret | The guard, `.env.example` | server-expressjs | `fix/fail-closed-secrets` |  |
 | 3 | Dependencies to current, Express 5 migration | `package.json`, the middleware and routes it breaks | server-expressjs | `build/dependency-upgrade` |  |
-| 4 | Close the `viewer` write escalation | `addKnowledge` authorization, role-aware token issuance | server-expressjs | `fix/project-authorization` |  |
+| 4 | Role hierarchy, and guard `addKnowledge` | `src/utils/roles.js`, the three loaders, the MCP write/admin split | server-expressjs | `fix/project-authorization` |  |
 | 5 | Bind API tokens to live membership, expire them | `apiToken` middleware, issuance, removal | server-expressjs | `fix/api-token-lifecycle` |  |
 | 6 | Bound the work a request can cause | Rate limits, authorization order, upload limits, timeouts | server-expressjs | `fix/request-limits` |  |
 | 7 | Stop the information the error paths give away | `helmet`, health, error handler, timing, enumeration | server-expressjs | `fix/error-disclosure` |  |
@@ -176,6 +176,74 @@ the safe direction; the error handler that receives it is task 7's work.
 
 Depends on: task 2. Task 4 onward depend on the router change and the resolved tree.
 
+### Task 4 — fix/project-authorization
+
+Closes H2, and replaces the authorization model to do it.
+
+**This task changed shape.** The plan scoped it as "add the missing check to
+`addKnowledge`, and stop a `viewer` minting a token". The user directed that any member
+may mint a token, and that an `editor` must be able to write. Neither is a gate change
+in one place: it is a change to the role model itself, which this codebase had written
+out four separate times.
+
+The finding that changed the analysis: the plan's assumption that "`editor` may write,
+matching the existing `canEdit` semantics" was wrong. Every controller implemented the
+same expression, `isOwner || memberRole === 'admin'`, so `editor` and `viewer` were both
+entirely read-only and `editor` granted nothing anywhere. The user asked for `editor` to
+write, which meant defining the hierarchy rather than adjusting a comparison.
+
+Landed:
+
+* `src/utils/roles.js`, new. One definition of the three roles and two questions:
+  `canWrite(isOwner, role)` and `canAdminister(isOwner, role)`. Roles are ranked
+  `viewer` 1, `editor` 2, `admin` 3, and ownership is passed alongside the role so the
+  two can never be confused — the owner is not a role, it is `documents.owner_id`.
+* `documentController.js`, `fileController.js`: `canEdit` now uses `canWrite`, so an
+  editor may change the project's title and description, and upload and delete
+  knowledge files.
+* `projectModelController.js`: `canConfigure` now uses `canAdminister`, which is
+  unchanged in effect. Model selection, backfill and embedding deletion stay with the
+  owner and admins.
+* `mcpController.js`: `assertProjectAdmin` split into `loadTokenAccess` — the one query
+  both guards share, so they cannot disagree about who the caller is — plus
+  `assertProjectWrite` and `assertProjectAdmin`. Title, description and file upload moved
+  to the write guard; member management stays on the admin guard.
+* `addKnowledge` now calls `assertProjectWrite`, which is the finding. It is placed
+  before the OpenRouter call, not after, because `embedText` bills the acting user's own
+  credits: checking later would let a read-only token spend them first.
+* Token issuance is deliberately unchanged, per the user's direction: any member,
+  including a `viewer`, may mint one. It is safe because every write tool is gated, and
+  task 5 is what makes a token stop working when the membership behind it is removed.
+
+**Administration deliberately stays stricter than writing.** `canAdminister` is
+owner-or-admin, so an editor cannot grant roles. An editor who could hand out roles
+could promote themselves, which would make the write grant an escalation path rather
+than a capability. This boundary was chosen here rather than asked, and is the one part
+of the role change worth a second opinion.
+
+Verified, not by inspection:
+
+* The role hierarchy, across all seven cases that matter — owner, admin, editor, viewer,
+  non-member, an owner who is also a viewer, and an unrecognised role string. `editor`
+  writes and does not administer; `viewer` does neither; the bogus role `'owner'` is
+  rejected, so the ownership flag cannot be smuggled through the role column.
+* The guard in `addKnowledge` precedes both the key decryption and the credit spend,
+  checked against the executable statements with comments stripped — a first attempt
+  compared raw string offsets and was misled by the guard's own comment.
+* Every controller and the new util load; over HTTP `/` and `/api/ping` answer 200, an
+  unknown path answers 404, and `/health` answers 503 with no database, as expected.
+
+Checked and deliberately not changed: `client-reactjs` renders the `canEdit`,
+`canConfigure` and `canManage` booleans the API sends and never re-derives a role
+itself, so the new model reaches the UI with no client change. Member management is
+**owner-only** on the web path (`documentController.js:228`) but **owner-or-admin** on
+the MCP path (`mcpController.js:462`). That divergence predates this work, is not part
+of the requested change, and is reported as a discovery finding rather than quietly
+reconciled.
+
+Depends on: task 3. Task 5 depends on the role model settled here, because revoking a
+token has to know which roles it was valid for.
+
 ## Decisions
 
 * **The guard throws rather than warns.** A process that starts with a defaulted secret
@@ -185,10 +253,14 @@ Depends on: task 2. Task 4 onward depend on the router change and the resolved t
 * **A set value that equals the published default is rejected, not just an unset one.**
   Setting `JWT_SECRET` to the literal in `.env.example` is the same failure as not
   setting it, and it is the more likely mistake, because the file is copy-pasted.
-* **`editor` is assumed able to write.** The role check on knowledge writes gates at
-  admin today and this work keeps that bar. Whether `editor` should also be able to mint
-  a project token is a product decision, not a security one, and is asked before that
-  task rather than assumed.
+* **Any member may mint a project token; `editor` may write.** Both are the user's
+  direction, and both are product decisions rather than security findings. A minted token
+  is safe because every write tool is gated, and because task 5 makes the token stop
+  working when the membership behind it is removed. The plan's earlier assumption that
+  `editor` could already write was wrong and is corrected in task 4.
+* **Administration is stricter than writing.** `canAdminister` is owner-or-admin, so an
+  editor cannot grant roles. An editor able to hand out roles could promote themselves,
+  which would turn the write grant into an escalation path.
 * **Encryption key rotation is operational, not code.** The guard stops a future
   misconfiguration; it cannot reach back to a deployment that already booted on the
   published constants. Rotating `JWT_SECRET` and `ENCRYPTION_KEY` is a deployment step
@@ -201,4 +273,4 @@ Depends on: task 2. Task 4 onward depend on the router change and the resolved t
 
 ## Status
 
-In progress. Tasks 1 to 3 of 9 complete.
+In progress. Tasks 1 to 4 of 9 complete.

@@ -7,6 +7,7 @@ const { embedText, toVectorLiteral, normalizeModelName } = require('../utils/emb
 const { getCoverage } = require('../utils/embeddingCoverage');
 const { getDecryptedOpenRouterKey } = require('../utils/userKeys');
 const { ingestFile, ALLOWED_EXTENSIONS, isAllowedFilename } = require('../utils/fileIngest');
+const { canWrite, canAdminister } = require('../utils/roles');
 
 const NO_KEY_MESSAGE =
   'No OpenRouter API key configured for your account. Add your own key in the ' +
@@ -176,6 +177,8 @@ async function search(req, res, next) {
  * Body: { content }
  * Embeds the text with the project's model (using the acting user's OpenRouter
  * key) and stores it as a new chunk. Audited against the acting user + token.
+ *
+ * Requires write access: the owner, or an 'editor' or 'admin' member.
  */
 async function addKnowledge(req, res, next) {
   try {
@@ -186,6 +189,11 @@ async function addKnowledge(req, res, next) {
       return res.status(400).json({ error: 'content is required' });
     }
     const text = String(content).trim();
+
+    // Authorise before spending anything. embedText below bills the acting
+    // user's own OpenRouter credits, so a read-only token has to be refused
+    // here — checking after the call would let it burn credits first.
+    await assertProjectWrite(projectId, userId);
 
     const apiKey = await getDecryptedOpenRouterKey(userId);
     if (!apiKey) return res.status(412).json({ error: NO_KEY_MESSAGE });
@@ -251,18 +259,20 @@ async function addKnowledge(req, res, next) {
 const ALLOWED_MEMBER_ROLES = ['editor', 'viewer', 'admin'];
 
 /**
- * Authorisation guard for project-mutating MCP tools.
+ * Resolve the token's project and the token user's standing in it.
  *
  * SECURITY: the caller's role is resolved ENTIRELY from server-side data — the
  * user + project bound to the presented API token — never from tool arguments.
  * This means a prompt-injected tool call cannot escalate privileges or target
  * a different project: the LLM has no way to assert "I am an admin" or to point
- * the mutation at someone else's project. Throws 403 if the token's user is not
- * the owner or an admin of the token's project.
+ * the mutation at someone else's project.
+ *
+ * Both guards below are built on this, so they cannot disagree about who the
+ * caller is. Throws 404 when the project does not exist.
  *
  * @returns {Promise<{isOwner: boolean, role: string|null, ownerId: string}>}
  */
-async function assertProjectAdmin(projectId, userId) {
+async function loadTokenAccess(projectId, userId) {
   const { rows } = await db.query(
     `SELECT d.owner_id,
             (d.owner_id = $2) AS is_owner,
@@ -277,14 +287,52 @@ async function assertProjectAdmin(projectId, userId) {
     err.status = 404;
     throw err;
   }
-  const isOwner = rows[0].is_owner;
-  const role = rows[0].member_role;
-  if (!(isOwner || role === 'admin')) {
+  return {
+    isOwner: rows[0].is_owner,
+    role: rows[0].member_role,
+    ownerId: rows[0].owner_id,
+  };
+}
+
+/**
+ * Authorisation guard for MCP tools that WRITE to the project — adding
+ * knowledge, uploading files, changing the title or description.
+ *
+ * Throws 403 unless the token's user is the owner, or a member with the
+ * 'editor' or 'admin' role. A 'viewer' token cannot reach a write tool.
+ *
+ * @returns {Promise<{isOwner: boolean, role: string|null, ownerId: string}>}
+ */
+async function assertProjectWrite(projectId, userId) {
+  const access = await loadTokenAccess(projectId, userId);
+  if (!canWrite(access.isOwner, access.role)) {
+    const err = new Error(
+      'Forbidden: writing requires the project owner, or an editor or admin role'
+    );
+    err.status = 403;
+    throw err;
+  }
+  return access;
+}
+
+/**
+ * Authorisation guard for MCP tools that ADMINISTER the project — granting or
+ * changing a member's role.
+ *
+ * Stricter than assertProjectWrite on purpose: handing role management to an
+ * editor would let an editor promote themselves to admin. Throws 403 unless
+ * the token's user is the owner or a member with the 'admin' role.
+ *
+ * @returns {Promise<{isOwner: boolean, role: string|null, ownerId: string}>}
+ */
+async function assertProjectAdmin(projectId, userId) {
+  const access = await loadTokenAccess(projectId, userId);
+  if (!canAdminister(access.isOwner, access.role)) {
     const err = new Error('Forbidden: you must be the project owner or an admin');
     err.status = 403;
     throw err;
   }
-  return { isOwner, role, ownerId: rows[0].owner_id };
+  return access;
 }
 
 /**
@@ -338,7 +386,7 @@ async function updateProjectTitle(req, res, next) {
       return res.status(400).json({ error: 'title is required' });
     }
 
-    await assertProjectAdmin(projectId, userId);
+    await assertProjectWrite(projectId, userId);
 
     const { rows } = await db.query(
       `UPDATE documents SET title = $2, updated_at = CURRENT_TIMESTAMP
@@ -375,7 +423,7 @@ async function updateProjectDescription(req, res, next) {
       return res.status(400).json({ error: 'description is required' });
     }
 
-    await assertProjectAdmin(projectId, userId);
+    await assertProjectWrite(projectId, userId);
 
     const summary = String(description).trim() || null;
     const { rows } = await db.query(
@@ -500,7 +548,7 @@ async function uploadFile(req, res, next) {
       buffer = Buffer.from(String(content), 'utf8');
     }
 
-    await assertProjectAdmin(projectId, userId);
+    await assertProjectWrite(projectId, userId);
 
     const apiKey = await getDecryptedOpenRouterKey(userId);
     if (!apiKey) return res.status(412).json({ error: NO_KEY_MESSAGE });

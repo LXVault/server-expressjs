@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../config/db');
+const { canWrite } = require('../utils/roles');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_ROLES = ['editor', 'viewer', 'admin'];
@@ -12,7 +13,8 @@ function isUuid(value) {
 /**
  * Fetch a document and the caller's relationship to it.
  * Returns { document, isOwner, isMember, memberRole, canEdit } or null.
- * `canEdit` is true for the owner or a member with the 'admin' role.
+ * `canEdit` is true for the owner, or a member with the 'editor' or 'admin'
+ * role. See src/utils/roles.js for the hierarchy.
  */
 async function loadAccess(documentId, userId) {
   const { rows } = await db.query(
@@ -27,7 +29,7 @@ async function loadAccess(documentId, userId) {
   if (!rows[0]) return null;
   const { is_owner: isOwner, member_role: memberRole, ...document } = rows[0];
   const isMember = Boolean(memberRole);
-  const canEdit = isOwner || memberRole === 'admin';
+  const canEdit = canWrite(isOwner, memberRole);
   return { document, isOwner, isMember, memberRole, canEdit };
 }
 
