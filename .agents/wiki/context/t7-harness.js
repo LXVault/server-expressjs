@@ -45,17 +45,32 @@ function eq(name, actual, expected) {
 const U = {
   owner: { id: '11111111-1111-4111-8111-111111111111', username: 'owner', email: 'owner@example.com', token_version: 3 },
   editor: { id: '22222222-2222-4222-8222-222222222222', username: 'editor', email: 'editor@example.com', token_version: 0 },
+  admin: { id: '33333333-3333-4333-8333-333333333333', username: 'admin', email: 'admin@example.com', token_version: 0 },
+  viewer: { id: '55555555-5555-4555-8555-555555555555', username: 'viewer', email: 'viewer@example.com', token_version: 0 },
 };
 
-let users = [U.owner, U.editor];
+let users = [U.owner, U.editor, U.admin, U.viewer];
 
 // A project the owner can administer, so the member-add route is reachable
 // rather than stopping at the access check.
 const PROJECT = { id: '44444444-4444-4444-8444-444444444444' };
-// A realistic bcrypt hash so the timing comparison is against real work.
-const REAL_HASH = require('bcryptjs').hashSync('correct-password', 10);
-users[0] = { ...U.owner, password_hash: REAL_HASH };
-users[1] = { ...U.editor, password_hash: require('bcryptjs').hashSync('other-password', 10) };
+// Each caller's relationship to that project, so the member-management
+// authorization can be asked about an owner, an admin, an editor and a viewer
+// rather than only the owner. The owner holds no membership row at all — they
+// are admitted from documents.owner_id, which is the case worth covering.
+const ROLE_BY_USER = {
+  [U.owner.id]: null,
+  [U.admin.id]: 'admin',
+  [U.editor.id]: 'editor',
+  [U.viewer.id]: 'viewer',
+};
+// A realistic bcrypt hash so the timing comparison is against real work. The
+// owner's password is fixed because the sign-in assertions below use it.
+const PASSWORD_BY_USER = { [U.owner.id]: 'correct-password' };
+users = users.map((u) => ({
+  ...u,
+  password_hash: require('bcryptjs').hashSync(PASSWORD_BY_USER[u.id] || `${u.username}-password`, 10),
+}));
 
 let logoutBumps = 0;
 
@@ -111,10 +126,13 @@ const pool = {
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
     }
 
-    // A project the caller owns, so loadAccess succeeds and the member-add
-    // route actually reaches its user lookup. Without this the enumeration
-    // branch is never entered and the test passes for the wrong reason.
+    // A project, with the caller's relationship resolved per user, so the
+    // member-management authorization can be asked about an owner, an admin,
+    // an editor and a viewer. Without a reachable row the member-add route
+    // never enters the enumeration branch and those tests pass for the wrong
+    // reason.
     if (/SELECT d\.\*/.test(text) || /member_role/.test(text)) {
+      const callerId = params[1];
       return {
         rows: [{
           id: PROJECT.id,
@@ -122,8 +140,8 @@ const pool = {
           title: 'Probe project',
           summary: null,
           embedding_model: 'openai/text-embedding-3-small',
-          is_owner: true,
-          member_role: null,
+          is_owner: callerId === U.owner.id,
+          member_role: ROLE_BY_USER[callerId] || null,
         }],
         rowCount: 1,
       };
@@ -390,6 +408,66 @@ function req(method, path, { body, token, headers = {} } = {}) {
   check('both probes return the same body',
     addRes.raw.replace(probe, 'X') === byEmail.raw.replace('also-not-real@example.com', 'X'),
     `${addRes.raw} vs ${byEmail.raw}`);
+
+  // ------------------------------------------------- member administration
+  // Membership is owner-or-admin on both the web and the MCP path. The web
+  // path used to be owner-only, which contradicted the role model in
+  // src/utils/roles.js and disagreed with the MCP path.
+  console.log('\nMember management is owner-or-admin, on every surface');
+  // Read the live token_version rather than the constant above: the logout
+  // block earlier in this harness bumped the editor's, and a token signed with
+  // the stale value is refused at requireAuth with a 401 — which would make
+  // every assertion below pass or fail for the wrong reason.
+  const tokenFor = (u) =>
+    signToken({ ...u, token_version: users.find((row) => row.id === u.id).token_version });
+  const membersPath = `/api/documents/${PROJECT.id}/members`;
+
+  const asOwner = await req('POST', membersPath, {
+    token: tokenFor(U.owner), body: { identifier: 'someone-real', role: 'editor' },
+  });
+  // 404, not 403: the owner got past the gate and into the user lookup, where
+  // the identifier is deliberately absent. Asserting the exact status rather
+  // than "not 403" is what stops a 500 from reading as a pass.
+  eq('the owner passes the authorization gate and reaches the lookup', asOwner.status, 404);
+
+  const asAdmin = await req('POST', membersPath, {
+    token: tokenFor(U.admin), body: { identifier: 'someone-real', role: 'editor' },
+  });
+  eq('an admin reaches the same point as the owner', asAdmin.status, asOwner.status);
+
+  const asEditor = await req('POST', membersPath, {
+    token: tokenFor(U.editor), body: { identifier: 'someone-real', role: 'editor' },
+  });
+  eq('an editor is refused', asEditor.status, 403);
+
+  const asViewer = await req('POST', membersPath, {
+    token: tokenFor(U.viewer), body: { identifier: 'someone-real', role: 'editor' },
+  });
+  eq('a viewer is refused', asViewer.status, 403);
+
+  check('neither refusal names a role the caller does not hold',
+    !/owner only|only the owner/i.test(asEditor.raw + asViewer.raw), asEditor.raw + asViewer.raw);
+
+  // `canManage` is what the web app reads to decide whether to draw the
+  // controls at all, so it has to be the same canAdminister answer rather than
+  // a second opinion about ownership — otherwise the UI hides the buttons from
+  // an admin whose request would have succeeded.
+  const listAs = async (u) => {
+    const r = await req('GET', membersPath, { token: tokenFor(u) });
+    return r.status === 200 ? r.body.canManage : `status ${r.status}`;
+  };
+  eq('canManage is true for the owner', await listAs(U.owner), true);
+  eq('canManage is true for an admin', await listAs(U.admin), true);
+  eq('canManage is false for an editor', await listAs(U.editor), false);
+  eq('canManage is false for a viewer', await listAs(U.viewer), false);
+
+  // The stub has no branch for the DELETE, so it returns no rows and the route
+  // reports 404 — which is the point: reaching the delete at all is what shows
+  // the gate opened, and 404 rather than 500 shows it opened cleanly.
+  const removeAs = async (u) => (await req('DELETE', `${membersPath}/${U.viewer.id}`, { token: tokenFor(u) })).status;
+  eq('an admin reaches the delete', await removeAs(U.admin), 404);
+  eq('an editor is refused', await removeAs(U.editor), 403);
+  eq('the owner reaches the delete', await removeAs(U.owner), 404);
 
   // ---------------------------------------------------------------- M1
   console.log('\nM1 — CORS policy is an allow list');

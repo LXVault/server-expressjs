@@ -176,12 +176,18 @@ its knowledge base but cannot grant roles, because an editor who could hand out 
 promote themselves, which would make the write grant an escalation path rather than a
 capability.
 
+**Membership is managed by the owner and by admins, on both paths.** `canAdminister` is the
+only test either surface uses, so `POST /api/documents/:id/members`,
+`DELETE /api/documents/:id/members/:userId` and `POST /api/mcp/project/members` answer the
+same question the same way, and the `canManage` flag the web app reads is the same
+`canAdminister` result rather than a second opinion about ownership. The web path used to
+be owner-only, which contradicted the role model in `src/utils/roles.js` — where `admin` is
+documented as "everything an editor can do, plus member management" — and disagreed with
+the MCP path, where an admin already could. An admin who worked through an assistant but
+not through the browser was a difference in the interface, not in the authority.
+
 The owner is not a role. It is `documents.owner_id`, passed to these functions as a
 separate flag so ownership can never be smuggled through the role column.
-
-On the web path, membership is managed by the owner only. On the MCP path it is
-owner-or-admin, because an assistant administering a project on the owner's behalf is the
-normal case there. The two differ deliberately, and the table below records which is which.
 
 ## API surface
 
@@ -195,7 +201,7 @@ normal case there. The two differ deliberately, and the table below records whic
 | `GET /api/me/openrouter-key`, `PUT`, `DELETE` | JWT | Status, set and remove the caller's OpenRouter key. The key itself is never returned. |
 | `GET /api/documents`, `POST` | JWT | List accessible projects with chunk and file counts; create one. |
 | `GET /api/documents/:id`, `PUT` | JWT | Read a project; update title and summary, which needs write access. |
-| `GET /api/documents/:id/members`, `POST`, `DELETE /:userId` | JWT | Membership, managed by the owner. Removing a member also revokes their project tokens. |
+| `GET /api/documents/:id/members`, `POST`, `DELETE /:userId` | JWT | Membership, managed by the owner or an admin. Removing a member also revokes their project tokens. |
 | `GET /api/documents/:id/files`, `POST`, `DELETE /:fileId` | JWT | The project's source files. Upload and delete need write access. |
 | `GET /api/documents/:id/token`, `POST`, `DELETE` | JWT | The caller's project token. Any member may mint one, including a viewer. |
 | `GET /api/documents/:id/embedding-model`, `PUT` | JWT | Read the project's model plus its coverage and stored models; change it as owner or admin. |
@@ -208,7 +214,7 @@ normal case there. The two differ deliberately, and the table below records whic
 | `POST /api/mcp/knowledge`, `POST /api/mcp/files` | token | Append a chunk, upload a file. Needs write access, checked before the caller's OpenRouter credits are spent. |
 | `POST /api/mcp/projects` | token | Create a project owned by the token's user. |
 | `PUT /api/mcp/project/title`, `PUT /api/mcp/project/description` | token | Rename or re-describe the bound project. Needs write access. |
-| `POST /api/mcp/project/members` | token | Add a member or change a role. Owner or admin. |
+| `POST /api/mcp/project/members` | token | Add a member or change a role. Owner or admin, the same test as the web path. |
 
 
 ## Database schema

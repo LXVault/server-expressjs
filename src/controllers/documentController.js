@@ -2,8 +2,10 @@
 
 const db = require('../config/db');
 const { isUuid, loadAccess } = require('../utils/documentAccess');
-
-const ALLOWED_ROLES = ['editor', 'viewer', 'admin'];
+// The role list and both authority questions come from roles.js. This file used
+// to carry its own copy of the list and answered "is this the owner" inline,
+// which is the duplication that file exists to remove.
+const { canAdminister, isMemberRole, MEMBER_ROLES } = require('../utils/roles');
 
 /**
  * GET /api/documents (protected)
@@ -173,7 +175,7 @@ async function listMembers(req, res, next) {
       document: { id: access.document.id, title: access.document.title },
       owner,
       members: membersResult.rows,
-      canManage: access.isOwner,
+      canManage: canAdminister(access.isOwner, access.memberRole),
     });
   } catch (err) {
     return next(err);
@@ -181,7 +183,7 @@ async function listMembers(req, res, next) {
 }
 
 /**
- * POST /api/documents/:id/members (protected, owner only)
+ * POST /api/documents/:id/members (protected, owner or admin)
  * Body: { identifier (username or email), role }
  */
 async function addMember(req, res, next) {
@@ -193,14 +195,14 @@ async function addMember(req, res, next) {
     if (!identifier || !String(identifier).trim()) {
       return res.status(400).json({ error: 'identifier (username or email) is required' });
     }
-    if (!ALLOWED_ROLES.includes(role)) {
-      return res.status(400).json({ error: `role must be one of: ${ALLOWED_ROLES.join(', ')}` });
+    if (!isMemberRole(role)) {
+      return res.status(400).json({ error: `role must be one of: ${MEMBER_ROLES.join(', ')}` });
     }
 
     const access = await loadAccess(id, req.user.id);
     if (!access) return res.status(404).json({ error: 'Document not found' });
-    if (!access.isOwner) {
-      return res.status(403).json({ error: 'Only the document owner can add members' });
+    if (!canAdminister(access.isOwner, access.memberRole)) {
+      return res.status(403).json({ error: 'Only the project owner or an admin can add members' });
     }
 
     const target = String(identifier).trim();
@@ -237,7 +239,7 @@ async function addMember(req, res, next) {
 }
 
 /**
- * DELETE /api/documents/:id/members/:userId (protected, owner only)
+ * DELETE /api/documents/:id/members/:userId (protected, owner or admin)
  */
 async function removeMember(req, res, next) {
   try {
@@ -248,8 +250,8 @@ async function removeMember(req, res, next) {
 
     const access = await loadAccess(id, req.user.id);
     if (!access) return res.status(404).json({ error: 'Document not found' });
-    if (!access.isOwner) {
-      return res.status(403).json({ error: 'Only the document owner can remove members' });
+    if (!canAdminister(access.isOwner, access.memberRole)) {
+      return res.status(403).json({ error: 'Only the project owner or an admin can remove members' });
     }
 
     const { rowCount } = await db.query(

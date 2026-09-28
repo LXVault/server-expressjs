@@ -60,6 +60,12 @@ read.
   ranking exists, and both questions the application asks go through it. Administration is
   deliberately stricter than writing, so an editor cannot grant roles — an editor able to
   hand out roles could promote themselves.
+* **Membership is managed by the owner and by admins, on both paths.** The web path asked
+  whether the caller was the owner and nothing else, so an `admin` could add and remove
+  members through an assistant — where `canAdminister` is the test — but not through the
+  browser. Both paths now ask `canAdminister`, and the `canManage` flag the web app reads
+  is that same answer rather than a second opinion about ownership, so the controls appear
+  for an admin with no change to the client. An `editor` is still refused on both.
 * **Logout is real.** `POST /api/auth/logout` bumps the caller's `token_version`; a token
   carries the version it was signed with, so every outstanding token is retired at once. A
   stateless JWT cannot otherwise be cancelled, and the old remedy — rotating the global
