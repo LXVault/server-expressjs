@@ -88,7 +88,7 @@ Conventions come from the `lxagents-agents-base` connector. The tools below are 
 this repository uses. **Call each when its trigger fires, not at session start, and
 never all at once.** A convention with no row here does not apply to this repository.
 
-Adopted shared-set version: `1.0.0`
+Adopted shared-set version: `1/0/0`
 
 | When you are about to… | Call |
 |---|---|

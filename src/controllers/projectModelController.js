@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../config/db');
+const { canAdminister } = require('../utils/roles');
 const { pool } = db;
 const { recordAudit } = require('../utils/audit');
 const {
@@ -31,7 +32,9 @@ function isUuid(value) {
 
 /**
  * Load a project plus the caller's configuration rights.
- * Only the owner or a member with the 'admin' role may change the model.
+ * Only the owner or a member with the 'admin' role may change the model. Model
+ * configuration is administration, not writing, so 'editor' does not reach it —
+ * see src/utils/roles.js.
  * @returns {Promise<{project: Object, canConfigure: boolean, hasAccess: boolean}|null>}
  */
 async function loadModelAccess(projectId, userId) {
@@ -48,7 +51,7 @@ async function loadModelAccess(projectId, userId) {
   );
   if (!rows[0]) return null;
   const { is_owner: isOwner, member_role: memberRole, ...project } = rows[0];
-  const canConfigure = isOwner || memberRole === 'admin';
+  const canConfigure = canAdminister(isOwner, memberRole);
   const hasAccess = isOwner || Boolean(memberRole);
   return { project, canConfigure, hasAccess };
 }
@@ -212,8 +215,14 @@ async function backfillEmbeddings(req, res, next) {
         embedded.push({ id: chunk.id, vector });
       } catch (embedErr) {
         // Record and stop. A repeated failure is usually the key or the model,
-        // so continuing would spend the user's credits on the same error.
-        failed.push({ id: chunk.id, error: embedErr.message });
+        // so continuing would spend the user's credits on the same error. The
+        // message is kept for the response's own use; it is logged rather than
+        // returned, because it is OpenRouter's wording and not this
+        // application's.
+        console.error(
+          `[backfill] project ${id} model ${model}: ${embedErr.message}`
+        );
+        failed.push({ id: chunk.id });
         break;
       }
     }
@@ -251,10 +260,16 @@ async function backfillEmbeddings(req, res, next) {
     const payload = await buildModelPayload(id, model);
 
     // Nothing embedded and something failed means the first call already broke,
-    // so report the reason rather than a success with a zero count.
+    // so report that it broke without reporting what OpenRouter said. The
+    // upstream message is in the log; the response gets this application's own
+    // wording, because a reflected upstream body is a way to read somebody
+    // else's error page through this endpoint.
     if (embedded.length === 0 && failed.length > 0) {
       return res.status(502).json({
-        error: `Could not generate embeddings: ${failed[0].error}`,
+        error:
+          'Could not generate embeddings. The embedding provider rejected the ' +
+          'request — check that your OpenRouter API key is valid and that the ' +
+          'project\'s model is one that provider serves.',
         ...payload,
       });
     }

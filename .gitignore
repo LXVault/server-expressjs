@@ -10,8 +10,11 @@ build/
 .env.local
 .env.*.local
 
-# Generated orchestration file (use docker-compose.yml.example as the template)
-docker-compose.yml
+# No compose file is tracked. Deployment is documented in
+# wiki/environments/docker.md, which records why the compose file that existed
+# early on was removed. Uncomment the line below only if you generate one
+# locally.
+# docker-compose.yml
 
 # Logs
 # Runtime log directories only. wiki/logs/ is the versioned changelog tree and

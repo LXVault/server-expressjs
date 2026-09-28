@@ -10,9 +10,19 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(50) UNIQUE NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
+    -- Bumped on logout. A session token carries the value it was signed with, so
+    -- a token presented after a logout carries a version the user row no longer
+    -- holds and is refused. This is what makes logout real: a stateless token
+    -- cannot otherwise be cancelled before it expires on its own.
+    token_version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Brings older databases up to date. Every session token minted before this
+-- column existed carries no `ver` claim and is treated as version 0, which is
+-- what these rows default to, so signing out here does not sign anyone out.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
 
 -- Per-project execution tokens. Each user may hold at most ONE active token
 -- per project (enforced by the uq_api_tokens_user_project unique index below).
@@ -199,6 +209,18 @@ CREATE TABLE IF NOT EXISTS user_openrouter_keys (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Brings older databases up to date. The AES key protecting a stored API key is
+-- derived per row from ENCRYPTION_KEY and that row's salt, and both travel with
+-- the ciphertext, so a row has to carry them to be opened at all.
+--
+-- Both columns are nullable and a row with neither is a row written before this
+-- existed, which was encrypted under a single unsalted SHA-256 pass. Those rows
+-- still open — src/utils/crypto.js reads them through that derivation — and
+-- src/utils/userKeys.js rewrites one under scrypt the first time it is read, so
+-- nothing has to be backfilled and no user is asked to re-enter their key.
+ALTER TABLE user_openrouter_keys ADD COLUMN IF NOT EXISTS key_salt TEXT;
+ALTER TABLE user_openrouter_keys ADD COLUMN IF NOT EXISTS key_kdf VARCHAR(16);
 
 -- ---------------------------------------------------------------------------
 -- Knowledge-base file uploads (RAG ingestion).

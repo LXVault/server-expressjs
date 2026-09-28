@@ -44,21 +44,24 @@ async function setKey(req, res, next) {
       return res.status(400).json({ error: 'apiKey looks too short to be valid' });
     }
 
-    const { ciphertext, iv, authTag } = encrypt(raw);
+    const { ciphertext, iv, authTag, salt, kdf } = await encrypt(raw);
     const last4 = raw.slice(-4);
 
     const { rows } = await db.query(
       `INSERT INTO user_openrouter_keys
-         (user_id, key_ciphertext, key_iv, key_auth_tag, key_last4, updated_at)
-       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+         (user_id, key_ciphertext, key_iv, key_auth_tag,
+          key_salt, key_kdf, key_last4, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
        ON CONFLICT (user_id)
        DO UPDATE SET key_ciphertext = EXCLUDED.key_ciphertext,
                      key_iv         = EXCLUDED.key_iv,
                      key_auth_tag   = EXCLUDED.key_auth_tag,
+                     key_salt       = EXCLUDED.key_salt,
+                     key_kdf        = EXCLUDED.key_kdf,
                      key_last4      = EXCLUDED.key_last4,
                      updated_at     = CURRENT_TIMESTAMP
        RETURNING key_last4, updated_at`,
-      [req.user.id, ciphertext, iv, authTag, last4]
+      [req.user.id, ciphertext, iv, authTag, salt, kdf, last4]
     );
 
     return res.status(201).json({

@@ -1,35 +1,11 @@
 'use strict';
 
 const db = require('../config/db');
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ALLOWED_ROLES = ['editor', 'viewer', 'admin'];
-
-function isUuid(value) {
-  return typeof value === 'string' && UUID_RE.test(value);
-}
-
-/**
- * Fetch a document and the caller's relationship to it.
- * Returns { document, isOwner, isMember, memberRole, canEdit } or null.
- * `canEdit` is true for the owner or a member with the 'admin' role.
- */
-async function loadAccess(documentId, userId) {
-  const { rows } = await db.query(
-    `SELECT d.*,
-            (d.owner_id = $2) AS is_owner,
-            (SELECT dm.role FROM document_members dm
-              WHERE dm.document_id = d.id AND dm.user_id = $2) AS member_role
-     FROM documents d
-     WHERE d.id = $1`,
-    [documentId, userId]
-  );
-  if (!rows[0]) return null;
-  const { is_owner: isOwner, member_role: memberRole, ...document } = rows[0];
-  const isMember = Boolean(memberRole);
-  const canEdit = isOwner || memberRole === 'admin';
-  return { document, isOwner, isMember, memberRole, canEdit };
-}
+const { isUuid, loadAccess } = require('../utils/documentAccess');
+// The role list and both authority questions come from roles.js. This file used
+// to carry its own copy of the list and answered "is this the owner" inline,
+// which is the duplication that file exists to remove.
+const { canAdminister, isMemberRole, MEMBER_ROLES } = require('../utils/roles');
 
 /**
  * GET /api/documents (protected)
@@ -199,7 +175,7 @@ async function listMembers(req, res, next) {
       document: { id: access.document.id, title: access.document.title },
       owner,
       members: membersResult.rows,
-      canManage: access.isOwner,
+      canManage: canAdminister(access.isOwner, access.memberRole),
     });
   } catch (err) {
     return next(err);
@@ -207,7 +183,7 @@ async function listMembers(req, res, next) {
 }
 
 /**
- * POST /api/documents/:id/members (protected, owner only)
+ * POST /api/documents/:id/members (protected, owner or admin)
  * Body: { identifier (username or email), role }
  */
 async function addMember(req, res, next) {
@@ -219,14 +195,14 @@ async function addMember(req, res, next) {
     if (!identifier || !String(identifier).trim()) {
       return res.status(400).json({ error: 'identifier (username or email) is required' });
     }
-    if (!ALLOWED_ROLES.includes(role)) {
-      return res.status(400).json({ error: `role must be one of: ${ALLOWED_ROLES.join(', ')}` });
+    if (!isMemberRole(role)) {
+      return res.status(400).json({ error: `role must be one of: ${MEMBER_ROLES.join(', ')}` });
     }
 
     const access = await loadAccess(id, req.user.id);
     if (!access) return res.status(404).json({ error: 'Document not found' });
-    if (!access.isOwner) {
-      return res.status(403).json({ error: 'Only the document owner can add members' });
+    if (!canAdminister(access.isOwner, access.memberRole)) {
+      return res.status(403).json({ error: 'Only the project owner or an admin can add members' });
     }
 
     const target = String(identifier).trim();
@@ -236,7 +212,11 @@ async function addMember(req, res, next) {
     );
     const user = userResult.rows[0];
     if (!user) {
-      return res.status(404).json({ error: `No user found matching "${target}"` });
+      // The message is fixed and does not echo the identifier back. This
+      // endpoint is the one place an authenticated user could otherwise read
+      // the user table one probe at a time, and a response that repeats the
+      // probe confirms the lookup ran.
+      return res.status(404).json({ error: 'No user matches that username or email' });
     }
     if (user.id === access.document.owner_id) {
       return res.status(409).json({ error: 'That user already owns this document' });
@@ -259,7 +239,7 @@ async function addMember(req, res, next) {
 }
 
 /**
- * DELETE /api/documents/:id/members/:userId (protected, owner only)
+ * DELETE /api/documents/:id/members/:userId (protected, owner or admin)
  */
 async function removeMember(req, res, next) {
   try {
@@ -270,8 +250,8 @@ async function removeMember(req, res, next) {
 
     const access = await loadAccess(id, req.user.id);
     if (!access) return res.status(404).json({ error: 'Document not found' });
-    if (!access.isOwner) {
-      return res.status(403).json({ error: 'Only the document owner can remove members' });
+    if (!canAdminister(access.isOwner, access.memberRole)) {
+      return res.status(403).json({ error: 'Only the project owner or an admin can remove members' });
     }
 
     const { rowCount } = await db.query(
@@ -281,6 +261,22 @@ async function removeMember(req, res, next) {
     if (rowCount === 0) {
       return res.status(404).json({ error: 'Member not found on this document' });
     }
+
+    // Revoke this member's project tokens explicitly, in the same request that
+    // removed them. The requireApiToken guard already stops the token working
+    // the moment the membership row is gone, so this is not what enforces the
+    // removal — it is what stops the token coming back. Without it, a member
+    // removed and later re-added would find their old token working again,
+    // including any authority it had been issued under.
+    await db.query(
+      `UPDATE api_tokens
+          SET is_active = FALSE
+        WHERE project_id = $1
+          AND user_id = $2
+          AND is_active = TRUE`,
+      [id, userId]
+    );
+
     return res.status(204).send();
   } catch (err) {
     return next(err);

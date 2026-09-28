@@ -13,6 +13,12 @@ const EMBEDDING_MODELS = [
 
 const DEFAULT_EMBEDDING_MODEL = 'openai/text-embedding-3-small';
 
+// Deadline on a single call to OpenRouter. `fetch` with no signal waits forever,
+// so a hung or slow upstream holds the request — and, during ingestion, a pooled
+// database connection is not yet held, but the caller's HTTP slot certainly is.
+// Thirty seconds is well beyond a normal embeddings call.
+const EMBEDDING_TIMEOUT_MS = 30_000;
+
 // A model id is a provider-namespaced slug, e.g. "openai/text-embedding-3-small".
 // We still validate the shape so junk/oversized strings can't be stored or sent.
 const MODEL_ID_RE = /^[A-Za-z0-9._/:-]{1,100}$/;
@@ -89,9 +95,17 @@ async function embedText({ apiKey, model, input }) {
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({ model, input }),
+      signal: AbortSignal.timeout(EMBEDDING_TIMEOUT_MS),
     });
   } catch (networkErr) {
-    const err = new Error(`Could not reach OpenRouter: ${networkErr.message}`);
+    // A timeout is not "could not reach OpenRouter" and reads as one to whoever
+    // sees the error, so it is named for what it was.
+    const timedOut = networkErr.name === 'TimeoutError';
+    const err = new Error(
+      timedOut
+        ? `OpenRouter did not respond within ${EMBEDDING_TIMEOUT_MS}ms`
+        : `Could not reach OpenRouter: ${networkErr.message}`
+    );
     err.status = 502;
     throw err;
   }
@@ -105,12 +119,29 @@ async function embedText({ apiKey, model, input }) {
   }
 
   if (!res.ok) {
-    const message =
-      (data && data.error && (data.error.message || data.error)) ||
-      `OpenRouter embeddings request failed (${res.status})`;
-    const err = new Error(String(message));
-    // Surface auth problems clearly so the user knows to fix their key.
-    err.status = res.status === 401 || res.status === 403 ? 401 : 502;
+    // OpenRouter's error body is not forwarded. It is the upstream's wording
+    // and can carry account identifiers, model availability notes and
+    // internal references; a caller of this API has no business reading it, and
+    // a reflected upstream body is a way to probe somebody else's service
+    // through this endpoint. It is logged, whole, for whoever is debugging.
+    console.error(
+      `[embeddings] OpenRouter returned ${res.status} for model ${model}: ${text}`
+    );
+    // A rejected key is a 502 here rather than a 401. The caller of this API is
+    // authenticated; it is OpenRouter that refused, and answering 401 would
+    // tell a signed-in user their session is bad. The distinction is preserved
+    // in the log, not in the status a client sees.
+    const authProblem = res.status === 401 || res.status === 403;
+    const err = new Error(
+      authProblem
+        ? 'OpenRouter rejected your API key. Check the key saved in your profile.'
+        : 'OpenRouter could not generate embeddings for this model.'
+    );
+    err.status = 502;
+    // Distinguishes "fix your key" from "the provider is unhappy" without
+    // exposing the upstream's own explanation. The upload path reports this
+    // rather than the status, which is why it is here and not in the message.
+    err.code = authProblem ? 'UPSTREAM_KEY_REJECTED' : 'UPSTREAM_ERROR';
     throw err;
   }
 
@@ -131,6 +162,7 @@ function toVectorLiteral(vector) {
 module.exports = {
   EMBEDDING_MODELS,
   DEFAULT_EMBEDDING_MODEL,
+  EMBEDDING_TIMEOUT_MS,
   isValidModelId,
   isConventionalModelId,
   normalizeModelName,
