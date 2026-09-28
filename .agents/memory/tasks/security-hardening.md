@@ -968,6 +968,16 @@ Nothing has been pushed and no pull request has been opened — the user asked t
 diff first. Opening and merging the pull request are separate gates and both are still
 closed.
 
+**Update, after the user reviewed the diff.** `chore/security-hardening-release` is pushed
+and in sync with `origin`, and the pull request is open: **LXVault/server-expressjs#13**,
+`Breaking Change: refuse to boot on a published secret, and close the disclosure paths`,
+43 files, +4494/−570 against `master`. It is **merge order 1 of 3** and the body carries that
+line, naming `mcp` and `client-reactjs` as merging after it.
+
+The merge gate is separate and **is still closed.** No tag was created: a tag on a version
+that has not shipped would claim a release that has not happened, so `2.0.0` is recorded in
+`package.json` and in `wiki/logs/2/0/0/CHANGELOG.md` and nowhere else.
+
 Four discovery findings were presented at the end of task 9 rather than self-applied, as
 the protocol requires. The user selected three, and they are committed:
 
