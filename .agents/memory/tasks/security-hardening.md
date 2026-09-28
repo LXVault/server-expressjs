@@ -50,7 +50,7 @@ the test is how a check passes without having checked anything.
 | 6 | Bound the work a request can cause | Rate limits, authorization order, upload limits, timeouts | server-expressjs | `fix/request-limits` |  |
 | 7 | Stop the information the error paths give away | `helmet`, health, error handler, timing, enumeration | server-expressjs | `fix/error-disclosure` |  |
 | 8 | Derive the key properly | scrypt and a persisted per-row salt | server-expressjs | `fix/encryption-kdf` |  |
-| 9 | Release | Version, changelog, this record closed | server-expressjs | `chore/security-hardening-release` |  |
+| 9 | Release | `2.0.0`, changelog, this record closed | server-expressjs | `chore/security-hardening-release` |  |
 
 Tasks 2 to 8 stack in this order; each branches from its predecessor. Two further
 chains run in the other repositories, ordered after this one because both read the API
@@ -731,6 +731,50 @@ before the release.
 
 Depends on: task 7.
 
+### Task 9 — chore/security-hardening-release
+
+`2.0.0`, approved by the user, with `wiki/logs/2/0/0/CHANGELOG.md` and `package.json` (and
+`package-lock.json`, whose two version fields were the only thing that changed — the
+lockfile was already accurate for every dependency).
+
+**Why a major, and why I asked rather than choosing.** A deployment that upgrades and
+changes nothing refuses to start, twice over: once for a published secret and once for a
+CORS wildcard in production. That is breaking by semver, and it is a version claim about
+what an operator must do, so the version rules gate it. The user's answer was `2.0.0`, with
+`1.2.0` and no bump offered as the alternatives.
+
+The changelog leads with an **Upgrading** section rather than burying the required
+operator actions under a feature list, because the first thing someone reads after a
+major bump is the answer to "what do I have to do before this boots".
+
+**Two version inconsistencies found while doing this, both reported rather than fixed:**
+
+* `package.json` said `1.0.0` while `wiki/logs/1/1/0/CHANGELOG.md` recorded a 1.1.0
+  released on 2026-09-10. The version was never bumped when 1.1.0 shipped. It now goes
+  straight to 2.0.0; bringing it to 1.1.0 first would have been a version claim of its
+  own, and the released 1.1.0 log is not mine to edit.
+* No git tag was created. A tag is a version carrier, and the commits are still local —
+  tagging a version that exists on no remote would be claiming a release that has not
+  happened. It belongs with the pull request.
+
+**The record is closed but the chains are not.** Every finding in `REPORT.md` is closed or
+explicitly deferred, and the three repositories each carry their own chain. What is
+deliberately left open, and why:
+
+* **The web client's `logout()` never calls the API.** See the cross-repository section
+  above. Scheduled as `fix/session-hygiene` in chain 3.
+* **MCP `/api/mcp/projects` exposes owner-equivalent capability to any member** — the
+  removal half of H4. Scheduled in chain 2 as `fix/remove-admin-from-mcp`.
+* **M15**, separate migration and runtime database roles: a deployment concern, not a code
+  change, and doing it properly means provisioning work outside this repository.
+* **Moving the session from `localStorage` to an httpOnly cookie.** Larger than it looks —
+  it is what would make the CORS wildcard critical — and it changes the auth shape of all
+  three repositories at once.
+* **M17 react-router**, **automated tests**, and **reducing the 20-files-per-upload
+  default**. Each is a product or scheduling decision rather than a defect.
+* **The 120/min MCP budget under real load.** A judgement call, unmeasured, and recorded as
+  the first number to revisit.
+
 ## Decisions
 
 * **The guard throws rather than warns.** A process that starts with a defaulted secret
@@ -854,9 +898,18 @@ is scheduled as `fix/session-hygiene` in that chain, where it belongs.
 
 ## Status
 
-In progress. Tasks 1 to 8 of 9 complete. Task 9 (the release: version, changelog, this
-record closed) is next. Two further chains run in the other repositories of this workspace,
-at merge order 2 of 3 and 3 of 3.
+**Complete for this repository.** All nine tasks are done and committed on stacked local
+branches, ending at `chore/security-hardening-release`. The release is `2.0.0`.
 
-Every finding in `REPORT.md` is now either closed or explicitly listed as deferred. The
-deferred ones, with the reason, are in the PR body when this branch is opened.
+Nothing has been pushed and no pull request has been opened — the user asked to review the
+diff first. Opening and merging the pull request are separate gates and both are still
+closed.
+
+Two further chains run in the other repositories of this workspace, at merge order 2 of 3
+(`mcp`) and 3 of 3 (`client-reactjs`). They are not started. Each needs its own task record
+in its own repository, its own branches, and its own pull request; a change spanning
+repositories is more than one work task and never one task in whichever repository happened
+to be open.
+
+Every finding in `REPORT.md` is either closed or listed with its reason in the **Task 9**
+entry above. Nothing was closed by quietly widening the question.
