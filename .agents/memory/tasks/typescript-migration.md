@@ -43,3 +43,18 @@ Each branch stacks on the one before it. One pull request per branch.
 Created this record and its row in `.agents/index/memory-index.md`. Nothing else has
 landed. Baseline taken before any change: the four harnesses pass 129 of 129 against the
 JavaScript (`t7-harness` 64, `t7-boot` 16, `t8-kdf` 44, `t8-boot` 5).
+
+### Task 2 — chore/dependencies
+
+Every runtime dependency is on its latest release: `dotenv` 18.0.10, `express` 5.3.0,
+`express-rate-limit` 8.7.4, `multer` 2.5.0, `pg` 8.23.1; the rest were already current.
+Added as dev dependencies: `typescript` 7.0.2, `tsx` 4.23.15, `@types/node`, and
+`@types/` packages for express, cors, jsonwebtoken, multer and pg. `bcryptjs` 3 and
+`pdf-parse` 2 ship their own declarations, so no `@types/` package is added for either.
+
+`nodemon` is removed. Its `minimatch` dependency carried an advisory with no
+non-breaking fix, and `tsx watch` replaces it from task 3. Until then `npm run dev` is
+`node --watch src/index.js`. `npm audit fix` cleared `body-parser`, `ip-address` and
+`qs`; `npm audit` now reports 0.
+
+Verified: the four harnesses still pass 129 of 129 on the upgraded tree.
