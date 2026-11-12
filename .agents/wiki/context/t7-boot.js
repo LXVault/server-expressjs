@@ -3,7 +3,7 @@
 /**
  * T7 boot guards, in clean child processes.
  *
- * `src/config/env.js` throws at require time, so a single process can only ever
+ * `src/config/env.ts` (compiled to `dist/config/env.js`) throws at require time, so a single process can only ever
  * prove one of these outcomes. Each case therefore runs in its own `node -e`
  * with its own environment, which is also the only honest way to test a guard:
  * running them in one process would prove that the FIRST throw happened, not
@@ -27,7 +27,7 @@ function check(name, condition, detail) {
 
 function boot(env) {
   try {
-    execFileSync(process.execPath, ['-e', "require('./src/config/env')"], {
+    execFileSync(process.execPath, ['-e', "require('./dist/config/env')"], {
       cwd: ROOT,
       env: { ...process.env, ...env },
       encoding: 'utf8',
@@ -73,7 +73,7 @@ console.log('\nTRUST_PROXY (T6, re-checked after the env.js edits)');
 for (const [value, expected] of [['', 1], ['0', null], ['-1', null], ['true', null], ['abc', null], ['1', 1], ['2', 2]]) {
   const r = boot({ NODE_ENV: 'development', TRUST_PROXY: value, CORS_ORIGIN: '' });
   if (!r.booted) { check(`TRUST_PROXY="${value}" resolves`, false, r.output.slice(0, 120)); continue; }
-  const out = execFileSync(process.execPath, ['-e', "process.stdout.write(String(require('./src/config/env').trustProxy))"], {
+  const out = execFileSync(process.execPath, ['-e', "process.stdout.write(String(require('./dist/config/env').default.trustProxy))"], {
     cwd: ROOT, env: { ...process.env, NODE_ENV: 'development', TRUST_PROXY: value }, encoding: 'utf8',
   });
   check(`TRUST_PROXY="${value}" -> ${expected}`, String(Number(out)) === String(expected) || (expected === null && out === 'null'),
@@ -84,7 +84,7 @@ console.log('\nJWT issuer/audience are not env-overridable');
 const spoof = boot({ ...prod, JWT_ISSUER: 'attacker', JWT_AUDIENCE: 'attacker' });
 if (!spoof.booted) { check('the app boots with JWT_ISSUER spoofed in the env', false, spoof.output.slice(0, 200)); }
 else {
-  const out = execFileSync(process.execPath, ['-e', "process.stdout.write(require('./src/config/env').JWT_ISSUER)"], {
+  const out = execFileSync(process.execPath, ['-e', "process.stdout.write(require('./dist/config/env').default.JWT_ISSUER)"], {
     cwd: ROOT, env: { ...process.env, ...prod, JWT_ISSUER: 'attacker' }, encoding: 'utf8',
   });
   check('a spoofed JWT_ISSUER in the environment is ignored', out === 'mcp-rag-server', `got ${out}`);

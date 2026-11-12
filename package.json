@@ -6,9 +6,10 @@
   "type": "commonjs",
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test": "npm run build && npm run typecheck && tsx --test test/*.test.ts"
   },
   "keywords": [
     "mcp",

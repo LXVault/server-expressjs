@@ -79,7 +79,7 @@ let insertDocumentsCalls = 0;
 // login session, so these assertions need real token values. hashToken is the
 // same function the middleware hashes with, so these are not made-up digests
 // the stub could match on anything.
-const { hashToken } = require(path.join(ROOT, 'src/utils/apiToken'));
+const { hashToken } = require(path.join(ROOT, 'dist/utils/apiToken'));
 const OWNER_API_TOKEN = 'probe-token-for-the-project-owner';
 const VIEWER_API_TOKEN = 'probe-token-for-a-viewer';
 const API_TOKEN_HOLDERS = {
@@ -218,16 +218,16 @@ const pool = {
   },
 };
 
-require.cache[require.resolve(path.join(ROOT, 'src/config/db'))] = {
-  id: path.join(ROOT, 'src/config/db'),
-  filename: path.join(ROOT, 'src/config/db'),
+require.cache[require.resolve(path.join(ROOT, 'dist/config/db'))] = {
+  id: path.join(ROOT, 'dist/config/db'),
+  filename: path.join(ROOT, 'dist/config/db'),
   loaded: true,
   exports: { pool, query: pool.query, healthCheck: async () => { throw new Error('ECONNREFUSED 10.0.0.5:5432'); } },
 };
 
-const config = APP('src/config/env');
-const app = APP('src/app');
-const { signToken } = APP('src/utils/jwt');
+const config = APP('dist/config/env').default;
+const app = APP('dist/app').default;
+const { signToken } = APP('dist/utils/jwt');
 const jwt = require('jsonwebtoken');
 
 // --- HTTP ------------------------------------------------------------------
