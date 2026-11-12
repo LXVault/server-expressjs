@@ -34,3 +34,7 @@ yarn-error.log*
 
 # Test coverage
 coverage/
+
+# Agent working plans. Scratch for the task in flight, never committed; see the
+# plan_creator convention.
+.agents/plans/
