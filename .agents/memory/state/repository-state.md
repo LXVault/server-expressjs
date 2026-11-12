@@ -7,7 +7,9 @@ description: Current known state of the mcp-rag-server backend after the instruc
 
 ## What exists
 
-A working Express.js backend, version `1.0.0`, CommonJS, no build step.
+A working Express.js backend in strict TypeScript. `src/` compiles with `tsc` to CommonJS
+in `dist/`, which is what `npm start` and the Docker image run; `npm run dev` runs the
+source through `tsx watch`. Checked against the repository on 2026-11-12.
 
 * Auth: register, login, JWT sessions, bcrypt password hashes.
 * Projects: the `documents` table, with members and roles of `owner`, `admin`, `editor`,
@@ -22,7 +24,7 @@ A working Express.js backend, version `1.0.0`, CommonJS, no build step.
 
 ## Stack
 
-Node with Express 4, `pg`, PostgreSQL with pgvector, `multer` for uploads, `pdf-parse` for
+Node 22 with TypeScript 7 and Express 5, `pg`, PostgreSQL with pgvector, `multer` for uploads, `pdf-parse` for
 PDF text, `jsonwebtoken` and `bcryptjs` for auth. Embeddings come from OpenRouter's
 OpenAI compatible endpoint using each user's own key.
 
@@ -33,9 +35,8 @@ connector, adopted version `1.0.0`. Nothing from it is copied into this reposito
 
 ## What is not built
 
-* No test suite and no linter configuration. The end to end check that verified the
-  embedding split was written for that task and run against a local database; it is not
-  part of the repository.
+* No linter configuration. `npm test` builds, type-checks, runs unit tests and runs the
+  four stub-DB harnesses against `dist/`; nothing in it talks to a real PostgreSQL.
 * No CI workflow.
 * No migrations tooling. `db/init.sql` is applied idempotently on boot instead.
 * No rate limiting on the API.

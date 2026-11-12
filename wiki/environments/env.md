@@ -1,6 +1,6 @@
 # Environment Variables
 
-Every variable has a fallback in `src/config/env.js`, so the server boots without a `.env`
+Every variable has a fallback in `src/config/env.ts`, so the server boots without a `.env`
 file. The fallbacks are development conveniences; two of them are unsafe in production and
 are marked below.
 
@@ -32,8 +32,8 @@ the likelier mistake and produces the same failure.
 | `ALLOW_ANY_ORIGIN` | unset | Set to `true` to let production run with `CORS_ORIGIN=*`. Only for a deployment with no browser client, or one where a single origin serves both the API and the app. |
 | `TRUST_PROXY` | `1` | How many proxies sit in front of the process, so `req.ip` is the client rather than the proxy. A number only; `true` is rejected on purpose. Set it to `0` or leave it empty to run against the app directly. |
 | `AUTO_MIGRATE` | unset | Set to the string `false` to stop `db/init.sql` being applied on boot. Any other value, including unset, applies it. |
-| `PG_POOL_MAX` | `10` | Maximum pooled connections. Read directly in `src/config/db.js`. |
-| `PG_IDLE_TIMEOUT` | `30000` | Idle client timeout in milliseconds. Read directly in `src/config/db.js`. |
+| `PG_POOL_MAX` | `10` | Maximum pooled connections. Read directly in `src/config/db.ts`. |
+| `PG_IDLE_TIMEOUT` | `30000` | Idle client timeout in milliseconds. Read directly in `src/config/db.ts`. |
 
 ## Notes
 

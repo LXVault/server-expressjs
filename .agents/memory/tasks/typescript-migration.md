@@ -116,3 +116,21 @@ through `require.cache`, which works because the output is CommonJS.
 
 Verified: `npm test` passes 11 of 11 (7 unit, 4 harness), and the harnesses inside it
 pass 129 of 129.
+
+### Task 5 — docs/typescript
+
+Brought every page that described the JavaScript tree in line with the TypeScript one:
+`README.md` (quick start, build, start, test), `wiki/environments/setup.md` (dev through
+tsx, build and start, a real Testing section), `wiki/environments/docker.md` (the build
+stage, `dist/index.js`), `wiki/environments/env.md` and
+`wiki/information/architecture.md` (`src/*.ts` paths, where the types live),
+`.agents/wiki/context/repository-map.md` (commands, `src/types/`, `npm test` as the
+regression check, three new gotchas: CommonJS output is load-bearing for the harnesses,
+the two default exports, and the wildcard-array bug), and
+`.agents/memory/state/repository-state.md`.
+
+Left stale on purpose, because they are instructions and the discovery protocol says to
+propose rather than edit: `.agents/rules/repository.md` still says every source file is
+CommonJS opening with `'use strict'`, names `src/config/migrate.js` and
+`src/utils/fileIngest.js`, and says there is no test suite. The finding is presented to
+the owner with the pull requests. `wiki/logs/` is untouched; it belongs to the release.
