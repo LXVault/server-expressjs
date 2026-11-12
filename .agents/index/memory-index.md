@@ -23,6 +23,7 @@ because continuity depends on it. Load only the rows whose scope matches the req
 |---|---|
 | [`../memory/tasks/embedding-matrix.md`](../memory/tasks/embedding-matrix.md) | Record of splitting chunk content from embeddings so a project can hold a vector per model: goal, what landed, how it was verified, and the decisions taken. |
 | [`../memory/tasks/security-hardening.md`](../memory/tasks/security-hardening.md) | Record of the security remediation and dependency currency work: the two CRITICAL secrets findings, the HIGH authorization and upload findings, and the major dependency upgrades. |
+| [`../memory/tasks/typescript-migration.md`](../memory/tasks/typescript-migration.md) | Record of migrating the backend from CommonJS JavaScript to strict TypeScript on the latest dependencies: plan, per-task entries, and how each was verified. |
 | [`../memory/tasks/agents-setup.md`](../memory/tasks/agents-setup.md) | Record of the instruction system setup: goal, mode, what was created, and the decisions taken. |
 
 ## Maintenance
