@@ -5,7 +5,7 @@ description: Record of migrating the mcp-rag-server backend from CommonJS JavaSc
 
 # Task: TypeScript migration
 
-status: in progress
+status: done
 
 **Goal.** The backend is about 4,000 lines of untyped CommonJS with no build step. Move it
 to strict TypeScript on the latest release of every dependency, with a clean `npm audit`,
@@ -32,7 +32,7 @@ was built.
 | 3 | TypeScript conversion | `tsconfig.json`, every `src/*.js` to typed `.ts`, `package.json` entry and scripts, Dockerfile build stage | `refactor/typescript` | |
 | 4 | Test suite | `npm test`: unit tests through tsx, then the four harnesses against `dist/` | `test/typescript-suite` | |
 | 5 | Documentation | `README.md`, `wiki/`, `.agents/wiki/` and state memory brought in line | `docs/typescript` | |
-| 6 | Release | Version, changelog, log index rows, closing entry | `release/{version}` | |
+| 6 | Release | Version, changelog, log index rows, closing entry | `release/3.0.0` | |
 
 Each branch stacks on the one before it. One pull request per branch.
 
@@ -134,3 +134,19 @@ discovery protocol says to propose rather than edit. The finding was presented a
 owner selected it ("apply") on 2026-11-12, so it landed in its own commit on this branch:
 the CommonJS and `'use strict'` rule now describes TypeScript compiled to CommonJS, the two
 `src/*.js` paths name the `.ts` files, and Running it describes `npm test`. `wiki/logs/` is untouched; it belongs to the release.
+
+### Task 6 — release/3.0.0
+
+The owner chose 3.0.0 on 2026-11-12: the HTTP API is unchanged, but every deployment's
+build and start commands are not, so an operator who changes nothing breaks. `package.json`
+and `package-lock.json` read `3.0.0`. Added `wiki/logs/3/0/0/CHANGELOG.md`, with an
+Upgrading section that names the new build and start commands, and its row at the top of
+`.agents/index/logs-index.md`. No session files exist under `.agents/memory/`, so there is
+no digest to fold.
+
+The `/` route still reports `version: '1.0.0'`, as it did in 2.0.0; it is a hard-coded
+string in `src/app.ts` and changing it is a behaviour change outside this migration.
+`logs-index.md` has no row for 2.0.0, which predates this work and is left as found.
+
+Verified at this commit: `npm run build` exit 0, `npm run typecheck` exit 0, `npm test`
+11 of 11, `npm audit` 0 vulnerabilities.
