@@ -153,3 +153,6 @@ Verified at this commit: `npm run build` exit 0, `npm run typecheck` exit 0, `np
 
 Pull requests opened 2026-11-12 as one stacked chain, #15 through #20, filled into the
 plan table above. Nothing is merged; merging waits on the owner.
+
+The owner asked on 2026-11-12 for `.agents/plans/` to be ignored; `.gitignore` now
+excludes it, verified with `git check-ignore -v .agents/plans/tasks.md`.
