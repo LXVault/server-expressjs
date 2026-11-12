@@ -12,8 +12,18 @@
 ```
 npm install
 cp .env.example .env      # optional, every value has a fallback
-npm run dev               # nodemon, reloads on change
+npm run dev               # tsx watch: runs src/index.ts, reloads on change
 ```
+
+The source is TypeScript and `npm run dev` runs it directly through `tsx`, with no build
+step. For the compiled server, the way production runs it:
+
+```
+npm run build             # tsc: src/ -> dist/
+npm start                 # node dist/index.js
+```
+
+`npm run typecheck` checks `src/` and `test/` without emitting anything.
 
 The server listens on `PORT`, default `4000`. Every variable and its fallback:
 [env.md](env.md).
@@ -73,11 +83,19 @@ explanation rather than failing silently.
 
 ## Testing
 
-There is no test suite and no linter in this repository. Verification is manual: boot the
-server and exercise the route you changed.
+```
+npm test
+```
 
-Four harnesses exist for the work that manual exercise would not catch, and they are worth
-knowing about even though they are not a test suite:
+That builds `dist/`, type-checks `src/` and `test/`, and runs every `test/*.test.ts` on
+Node's built-in `node:test` runner through `tsx`. There is no linter.
+
+* `test/units.test.ts` covers the pure helpers: roles, model-name normalization,
+  chunking, token hashing, JWT signing and the scrypt round trip.
+* `test/harnesses.test.ts` runs the four verification harnesses below against the
+  compiled `dist/`, and fails if any of them reports a failed check.
+
+The harnesses can also be run on their own, after `npm run build`:
 
 ```
 node .agents/wiki/context/t7-harness.js   # over real HTTP, real middleware
@@ -86,7 +104,7 @@ node .agents/wiki/context/t8-kdf.js       # key derivation, and the route that s
 node .agents/wiki/context/t8-boot.js      # the derivation across a process boundary
 ```
 
-All four stub the database and nothing else — the application under test is the real one.
-The t8 pair needs no database at all beyond the stub, so it runs anywhere. They were written
-for one task each and are not maintained as a regression suite; treat a failure in one as a
-prompt to look, not as a build step.
+All four stub the database and nothing else — the application under test is the real one,
+compiled. They stub the pool through `require.cache`, which is why the build emits
+CommonJS. No test talks to a real PostgreSQL, so a schema change is still verified by
+booting against a pgvector database and exercising the route.

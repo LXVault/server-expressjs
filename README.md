@@ -24,9 +24,13 @@ with a per project token so an assistant's actions stay attributable to a person
 
 ```
 npm install
-npm run dev
+npm run dev            # tsx watch, straight from the TypeScript source
 curl localhost:4000/health
 ```
+
+The source is TypeScript under `src/`. `npm run build` compiles it to `dist/`,
+`npm start` runs the compiled server, and `npm test` builds, type-checks and runs the
+tests.
 
 You need a PostgreSQL database with the `pgvector` extension available. Point
 `DATABASE_URL` at it; the schema creates itself on first boot. Every variable has a

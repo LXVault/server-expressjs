@@ -2,7 +2,7 @@
 
 ## The image
 
-`Dockerfile` is a three stage build on `node:22-slim`:
+`Dockerfile` is a four stage build on `node:22-slim`:
 
 1. **base** sets `/app` as the working directory and `NODE_ENV=production`.
 2. **deps** copies `package*.json` and runs `npm ci --omit=dev`, so the dependency
@@ -10,8 +10,13 @@
    exactly the tree that was audited rather than resolving version ranges again at build
    time. Node 20 reached end of life in April 2026, so the previous base image no longer
    received security fixes.
-3. **runtime** copies those `node_modules` plus the source, exposes `4000`, drops to the
-   unprivileged `node` user shipped with the base image, and runs `node src/index.js`.
+3. **build** installs every dependency with `npm ci --include=dev`, because the base
+   stage's `NODE_ENV=production` would otherwise skip the TypeScript compiler, then runs
+   `npm run build` to compile `src/` into `dist/`.
+4. **runtime** copies the production `node_modules`, the repository, and `dist/` from the
+   build stage, exposes `4000`, drops to the unprivileged `node` user shipped with the
+   base image, and runs `node dist/index.js`. `.dockerignore` excludes any local `dist/`,
+   so the image always carries what the build stage compiled.
 
 ```
 docker build -t mcp-rag-server .
@@ -32,7 +37,7 @@ variables above is what makes the container start.
 A reachable PostgreSQL with pgvector, and the variables in [env.md](env.md). The container
 carries no database of its own.
 
-**The schema applies itself on boot.** `src/index.js` calls `runMigrations` from `src/config/migrate.js` after the
+**The schema applies itself on boot.** `dist/index.js`, compiled from `src/index.ts`, calls `runMigrations` from `src/config/migrate.ts` after the
 listener starts, so a fresh database needs no init step, no entrypoint script and no
 init container. This is why the deployment works on managed platforms such as Render,
 which offer no hook to run SQL before the process starts.

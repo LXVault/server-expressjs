@@ -1,19 +1,24 @@
 # Architecture
 
+The source is strict TypeScript under `src/`, compiled by `tsc` to CommonJS in `dist/`,
+which is what runs in production. Shared types live in `src/types/`: `http.ts` for the
+request context and error shapes, `express.d.ts` for the properties the middleware
+attaches to `req`.
+
 ## Request flow
 
 ```
-src/index.js          boot: listen, health check, apply schema, graceful shutdown
-  src/app.js          CORS, JSON body limit, /health, mount /api, 404, error handler
+src/index.ts          boot: listen, health check, apply schema, graceful shutdown
+  src/app.ts          CORS, JSON body limit, /health, mount /api, 404, error handler
     src/routes/       path to controller wiring, one file per feature
       src/middleware/   auth (JWT), apiToken (per project), documentAccess
       src/controllers/  validation, authorization, SQL
         src/utils/      shared logic: embeddings, ingestion, crypto, jwt, audit, roles
-          src/config/db.js   the pg pool
+          src/config/db.ts   the pg pool
 ```
 
-`src/config/env.js` reads every environment variable once, each with a fallback, so the
-process boots without a `.env` file. `src/config/migrate.js` applies `db/init.sql` on boot.
+`src/config/env.ts` reads every environment variable once, each with a fallback, so the
+process boots without a `.env` file. `src/config/migrate.ts` applies `db/init.sql` on boot.
 
 ## Layers
 
@@ -22,9 +27,9 @@ multipart uploads. They hold no SQL.
 
 **Controllers** validate input, authorize the caller, run SQL and return a response. Each
 one is a plain async function with an `(req, res, next)` signature and a `try/catch` that
-forwards unexpected errors to the central handler in `src/app.js`.
+forwards unexpected errors to the central handler in `src/app.ts`.
 
-**Utils** hold anything two controllers need. `src/utils/fileIngest.js` is the worked
+**Utils** hold anything two controllers need. `src/utils/fileIngest.ts` is the worked
 example: the web upload path and the MCP upload path both call `ingestFile`, so the two
 behave identically rather than drifting.
 
@@ -53,7 +58,7 @@ simply too big, and the two are different signals to a client.
 request stream has been consumed, so `requireDocumentWrite` is mounted ahead of it on
 `POST /api/documents/:id/files`. Without that ordering a caller with no access to a
 project has already made the process allocate the whole upload by the time it is
-refused. `src/middleware/documentAccess.js` does the check and hands the result to the
+refused. `src/middleware/documentAccess.ts` does the check and hands the result to the
 controller, so the query runs once.
 
 ## Rate limits
@@ -74,7 +79,7 @@ address grinding through a list of accounts spends a separate budget per account
 account under attack from many addresses spends one budget per address.
 
 The auth and MCP routers are mounted **ahead** of the general limiter in
-`src/routes/index.js`, because a `use` that matches ends the walk down that router. That
+`src/routes/index.ts`, because a `use` that matches ends the walk down that router. That
 ordering is what lets the tighter and the larger budgets apply to their own surfaces instead
 of both being clamped to 60.
 
@@ -130,8 +135,8 @@ disabled. CORS is a named allow list rather than a wildcard; see
 
 | Path | Middleware | Populates | Guards |
 |---|---|---|---|
-| Human | `src/middleware/auth.js` | `req.user` | `/api/documents`, `/api/me`, `/api/tokens`, `/api/profile`, `/api/analysis` |
-| Assistant | `src/middleware/apiToken.js` | `req.apiToken` | `/api/mcp` |
+| Human | `src/middleware/auth.ts` | `req.user` | `/api/documents`, `/api/me`, `/api/tokens`, `/api/profile`, `/api/analysis` |
+| Assistant | `src/middleware/apiToken.ts` | `req.apiToken` | `/api/mcp` |
 
 A valid signature is necessary but not sufficient. `requireAuth` checks three things,
 because a signed token is only evidence that this server issued it at some point:
@@ -163,7 +168,7 @@ working on its own within a bounded time.
 ## Roles
 
 `document_members.role` is one of `viewer`, `editor` or `admin`, ranked in that order.
-`src/utils/roles.js` is the only place that ranking is written down, and both questions
+`src/utils/roles.ts` is the only place that ranking is written down, and both questions
 the application asks go through it:
 
 | Question | Answer |
@@ -181,7 +186,7 @@ only test either surface uses, so `POST /api/documents/:id/members`,
 `DELETE /api/documents/:id/members/:userId` and `POST /api/mcp/project/members` answer the
 same question the same way, and the `canManage` flag the web app reads is the same
 `canAdminister` result rather than a second opinion about ownership. The web path used to
-be owner-only, which contradicted the role model in `src/utils/roles.js` — where `admin` is
+be owner-only, which contradicted the role model in `src/utils/roles.ts` — where `admin` is
 documented as "everything an editor can do, plus member management" — and disagreed with
 the MCP path, where an admin already could. An admin who worked through an assistant but
 not through the browser was a difference in the interface, not in the authority.
@@ -263,7 +268,7 @@ Because a chunk is only searchable when it has a vector for the project's *curre
 a chunk count on its own is misleading: an uncovered knowledge base and an empty one look
 identical from a search result. Every endpoint that reports on a project therefore reports
 coverage as well, meaning the total chunks, how many are embedded with the selected model,
-and how many are still pending. `src/utils/embeddingCoverage.js` owns those two queries.
+and how many are still pending. `src/utils/embeddingCoverage.ts` owns those two queries.
 
 Backfilling is explicit rather than automatic. Changing the model is instant and spends
 nothing, and the separate backfill call is what spends the caller's OpenRouter credits, in
@@ -274,7 +279,7 @@ repeating it is safe and is how a large project is covered.
 
 There is no migration tool. `db/init.sql` is written so that every statement is safe to
 re-run, using `IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS` and guarded `DO` blocks, and
-`src/config/migrate.js` executes the whole file on every boot unless `AUTO_MIGRATE=false`.
+`src/config/migrate.ts` executes the whole file on every boot unless `AUTO_MIGRATE=false`.
 That keeps managed databases such as Render Postgres, which offer no init container hook,
 in sync without a manual step.
 
@@ -288,7 +293,7 @@ parameters.
 A stored model name follows the shared `{platform}/{model}` convention and is lower-cased
 before it is written, so `OpenAI/Text-Embedding-3-Small` and
 `openai/text-embedding-3-small` cannot both exist as rows for one chunk.
-`normalizeModelName` in `src/utils/embeddings.js` is the single place that decides the
+`normalizeModelName` in `src/utils/embeddings.ts` is the single place that decides the
 canonical spelling, and every write goes through it.
 
 The convention is enforced where a person *chooses* a model, so nothing new enters the
@@ -321,12 +326,12 @@ Rows written before this change carry no salt and no derivation name, and still 
 through the single unsalted SHA-256 pass they were written with. The first time one is
 read it is rewritten under scrypt, so no user is asked to re-enter their key and no
 ciphertext stays on the fast derivation indefinitely. That rewrite is best effort and
-never fails the caller's request; see `getDecryptedOpenRouterKey` in `src/utils/userKeys.js`.
+never fails the caller's request; see `getDecryptedOpenRouterKey` in `src/utils/userKeys.ts`.
 
 Rotating `ENCRYPTION_KEY` still makes every stored key undecryptable, so it is set once
 per environment and left alone.
 
-Note the contrast with `src/utils/apiToken.js`, which hashes project tokens with a single
+Note the contrast with `src/utils/apiToken.ts`, which hashes project tokens with a single
 SHA-256 and is correct: those are 32 bytes of `crypto.randomBytes`, so there is no
 low-entropy secret to stretch. A KDF only earns its cost on a value a human chose.
 
