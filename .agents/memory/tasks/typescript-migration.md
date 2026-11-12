@@ -58,3 +58,41 @@ non-breaking fix, and `tsx watch` replaces it from task 3. Until then `npm run d
 `qs`; `npm audit` now reports 0.
 
 Verified: the four harnesses still pass 129 of 129 on the upgraded tree.
+
+### Task 3 — refactor/typescript
+
+Every file under `src/` is renamed `.js` to `.ts` with `git mv` and typed under
+`"strict": true`. `tsconfig.json` targets ES2022 with `NodeNext` module and resolution,
+`rootDir ./src`, `outDir ./dist`. The package stays `"type": "commonjs"`, so the source
+uses ES `import`/`export` and `tsc` emits CommonJS; relative imports carry `.js`.
+
+What was added for the types, none of which changes behaviour:
+
+* `src/types/http.ts` holds the shared shapes (`HttpError`, `MemberRole`, `AuthUser`,
+  `ApiTokenContext`, `DocumentRow`, `DocumentAccess`) and `httpError()`, which builds the
+  same `Error` with `status` and `code` assigned that every throw site built by hand.
+* `src/types/express.d.ts` declares `req.user`, `req.apiToken` and `req.documentAccess`
+  as optional. Controllers behind a guard read them with `!`.
+* Query results are typed through `query<Row>()`; request bodies through a cast to a
+  per-handler interface, with the existing `String()` coercions left in place.
+* `env.ts` exports the config object as `default`; everything else uses named exports.
+
+Two loading details moved and were kept equivalent. `pdf-parse` is still loaded on first
+use, now through `await import()`. The router was a `require` inside `app.use`; it is a
+top-level import now, which only changes when the route modules load, not what they do.
+`migrate.ts` still resolves `../../db/init.sql`, which holds from `dist/config/` too.
+
+`package.json`: `main` is `dist/index.js`; scripts are `build` (`tsc`), `typecheck`,
+`start` (`node dist/index.js`) and `dev` (`tsx watch src/index.ts`). The Dockerfile gains
+a build stage (`npm ci --include=dev`, then `npm run build`) and runs `dist/index.js`.
+
+Verified: `tsc` reports zero errors, and a planted implicit `any` is rejected, so strict
+is in force. `node dist/index.js` boots and answers `/`, `/health` (503 with no
+database), `/api/ping` and the 401 on `/api/documents`; `tsx src/index.ts` boots too.
+The four harnesses, pointed at `dist/` (committed in task 4), pass 129 of 129. The image
+was not built: there is no Docker daemon in this environment.
+
+Found, not fixed: Express 5 delivers the `*model` wildcard as an array of segments, so
+`deleteModelEmbeddings` receives `["openai","text-embedding-3-small"]`,
+`normalizeModelName` returns null, and `DELETE /api/documents/:id/embeddings/*model`
+answers 400 for every model. This predates the migration and is left for its own change.

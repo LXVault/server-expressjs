@@ -1,0 +1,625 @@
+import type { NextFunction, Request, Response } from 'express';
+import * as db from '../config/db.js';
+import { recordAudit } from '../utils/audit.js';
+import { embedText, toVectorLiteral, normalizeModelName } from '../utils/embeddings.js';
+import { getCoverage } from '../utils/embeddingCoverage.js';
+import { getDecryptedOpenRouterKey } from '../utils/userKeys.js';
+import { ingestFile, ALLOWED_EXTENSIONS, isAllowedFilename } from '../utils/fileIngest.js';
+import { canWrite, canAdminister } from '../utils/roles.js';
+import { httpError, type MemberRole } from '../types/http.js';
+
+const { pool } = db;
+
+/** The caller's standing on the token's project, resolved from server-side data only. */
+interface TokenAccess {
+  isOwner: boolean;
+  role: MemberRole | null;
+  ownerId: string;
+}
+
+interface ChunkRow {
+  id: string;
+  chunk_index: number;
+  content: string;
+  created_at: Date;
+  embedding_model?: string | null;
+}
+
+interface ProjectSummaryRow {
+  id: string;
+  title: string;
+  summary: string | null;
+  updated_at: Date;
+}
+
+const NO_KEY_MESSAGE =
+  'No OpenRouter API key configured for your account. Add your own key in the ' +
+  'web app (Profile → OpenRouter API key) before using semantic search.';
+
+/**
+ * Fetch a project's currently selected embedding model, in the canonical
+ * spelling used by the model_name column.
+ */
+async function getProjectModel(projectId: string): Promise<string | null> {
+  const { rows } = await db.query<{ embedding_model: string | null }>(
+    `SELECT embedding_model FROM documents WHERE id = $1`,
+    [projectId]
+  );
+  return rows[0] ? normalizeModelName(rows[0].embedding_model) : null;
+}
+
+/**
+ * GET /api/mcp/me  (API-token auth)
+ * Identifies the user and project the presented token is bound to.
+ */
+export async function me(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void | Response> {
+  try {
+    const { tokenId, userId, username, projectId, projectTitle } = req.apiToken!;
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.whoami',
+      resourceTable: 'documents',
+      resourceId: projectId,
+    });
+
+    return res.json({
+      user: { id: userId, username },
+      project: { id: projectId, title: projectTitle },
+      tokenId,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * GET /api/mcp/project  (API-token auth)
+ * Returns details about the project the token grants access to: its selected
+ * embedding model, the total chunk count, and how many of those chunks are
+ * actually reachable by search with that model.
+ */
+export async function getProject(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void | Response> {
+  try {
+    const { tokenId, userId, projectId } = req.apiToken!;
+
+    const { rows } = await db.query(
+      `SELECT d.id,
+              d.title,
+              d.summary,
+              d.embedding_model,
+              d.created_at,
+              d.updated_at,
+              COUNT(dc.id)::int AS chunk_count
+       FROM documents d
+       LEFT JOIN document_chunks dc ON dc.document_id = d.id
+       WHERE d.id = $1
+       GROUP BY d.id`,
+      [projectId]
+    );
+
+    if (!rows[0]) return res.status(404).json({ error: 'Project not found' });
+
+    // chunk_count alone is misleading: a chunk with no vector for the current
+    // model is invisible to search. Report what search can actually reach so an
+    // assistant can explain an empty result instead of misreporting it.
+    const coverage = await getCoverage(projectId, normalizeModelName(rows[0].embedding_model));
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.get_project',
+      resourceTable: 'documents',
+      resourceId: projectId,
+    });
+
+    return res.json({
+      project: {
+        ...rows[0],
+        searchable_chunk_count: coverage.embedded,
+        chunks_awaiting_embedding: coverage.pending,
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * POST /api/mcp/search  (API-token auth)
+ * Body: { query, limit? }
+ * Semantic search: embeds the query with the project's model (using the acting
+ * user's own OpenRouter key) and ranks chunks by cosine similarity. Audited.
+ */
+export async function search(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void | Response> {
+  try {
+    const { tokenId, userId, projectId } = req.apiToken!;
+    const { query, limit } = (req.body || {}) as { query?: unknown; limit?: unknown };
+
+    if (!query || !String(query).trim()) {
+      return res.status(400).json({ error: 'query is required' });
+    }
+    // parseInt coerces its argument to a string, so a non-string limit behaves
+    // exactly as it did before the migration.
+    const max = Math.min(Math.max(parseInt(limit as string, 10) || 5, 1), 25);
+    const term = String(query).trim();
+
+    const apiKey = await getDecryptedOpenRouterKey(userId);
+    if (!apiKey) return res.status(412).json({ error: NO_KEY_MESSAGE });
+
+    const model = await getProjectModel(projectId);
+    const queryVector = await embedText({ apiKey, model, input: term });
+
+    // Exact KNN by cosine distance. Joining on model_name is what keeps the
+    // comparison well defined: vectors from two models have different
+    // dimensions and are not comparable, so only this model's rows take part.
+    const { rows } = await db.query(
+      `SELECT c.id, c.chunk_index, c.content,
+              1 - (e.embedding <=> $2::vector) AS score
+       FROM document_chunks c
+       JOIN document_chunk_embeddings e
+         ON e.chunk_id = c.id AND e.model_name = $3
+       WHERE c.document_id = $1
+       ORDER BY e.embedding <=> $2::vector
+       LIMIT $4`,
+      [projectId, toVectorLiteral(queryVector), model, max]
+    );
+
+    // An empty result has two very different causes. Coverage separates them,
+    // so the caller can say "nothing matched" or "this knowledge base is not
+    // embedded with the model the project currently uses" rather than guessing.
+    const coverage = await getCoverage(projectId, model);
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.search',
+      resourceTable: 'documents',
+      resourceId: projectId,
+      details: { query: term, model, results: rows.length },
+    });
+
+    return res.json({
+      query: term,
+      model,
+      results: rows,
+      total: rows.length,
+      coverage: {
+        searchable_chunks: coverage.embedded,
+        total_chunks: coverage.total,
+        chunks_awaiting_embedding: coverage.pending,
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * POST /api/mcp/knowledge  (API-token auth)
+ * Body: { content }
+ * Embeds the text with the project's model (using the acting user's OpenRouter
+ * key) and stores it as a new chunk. Audited against the acting user + token.
+ *
+ * Requires write access: the owner, or an 'editor' or 'admin' member.
+ */
+export async function addKnowledge(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void | Response> {
+  try {
+    const { tokenId, userId, projectId } = req.apiToken!;
+    const { content } = (req.body || {}) as { content?: unknown };
+
+    if (!content || !String(content).trim()) {
+      return res.status(400).json({ error: 'content is required' });
+    }
+    const text = String(content).trim();
+
+    // Authorise before spending anything. embedText below bills the acting
+    // user's own OpenRouter credits, so a read-only token has to be refused
+    // here — checking after the call would let it burn credits first.
+    await assertProjectWrite(projectId, userId);
+
+    const apiKey = await getDecryptedOpenRouterKey(userId);
+    if (!apiKey) return res.status(412).json({ error: NO_KEY_MESSAGE });
+
+    const model = await getProjectModel(projectId);
+    const vector = await embedText({ apiKey, model, input: text });
+
+    // Content and vector are separate rows, written together so a chunk is
+    // never stored without the embedding this request just paid for.
+    const client = await pool.connect();
+    let chunk: ChunkRow;
+    try {
+      await client.query('BEGIN');
+
+      const chunkRes = await client.query<ChunkRow>(
+        `INSERT INTO document_chunks (document_id, content, chunk_index)
+         VALUES (
+           $1,
+           $2,
+           COALESCE(
+             (SELECT MAX(chunk_index) + 1 FROM document_chunks WHERE document_id = $1),
+             0
+           )
+         )
+         RETURNING id, chunk_index, content, created_at`,
+        [projectId, text]
+      );
+      chunk = chunkRes.rows[0];
+
+      await client.query(
+        `INSERT INTO document_chunk_embeddings (chunk_id, model_name, embedding, dimensions)
+         VALUES ($1, $2, $3::vector, $4)
+         ON CONFLICT (chunk_id, model_name) DO NOTHING`,
+        [chunk.id, model, toVectorLiteral(vector), vector.length]
+      );
+
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    chunk.embedding_model = model;
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.add_knowledge',
+      resourceTable: 'document_chunks',
+      resourceId: chunk.id,
+      details: { chunk_index: chunk.chunk_index, model, length: text.length },
+    });
+
+    return res.status(201).json({ chunk });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// Roles a member may be granted.
+const ALLOWED_MEMBER_ROLES: readonly MemberRole[] = ['editor', 'viewer', 'admin'];
+
+/**
+ * Resolve the token's project and the token user's standing in it.
+ *
+ * SECURITY: the caller's role is resolved ENTIRELY from server-side data — the
+ * user + project bound to the presented API token — never from tool arguments.
+ * This means a prompt-injected tool call cannot escalate privileges or target
+ * a different project: the LLM has no way to assert "I am an admin" or to point
+ * the mutation at someone else's project.
+ *
+ * Both guards below are built on this, so they cannot disagree about who the
+ * caller is. Throws 404 when the project does not exist.
+ *
+ */
+async function loadTokenAccess(projectId: string, userId: string): Promise<TokenAccess> {
+  const { rows } = await db.query<{ owner_id: string; is_owner: boolean; member_role: MemberRole | null }>(
+    `SELECT d.owner_id,
+            (d.owner_id = $2) AS is_owner,
+            (SELECT dm.role FROM document_members dm
+              WHERE dm.document_id = d.id AND dm.user_id = $2) AS member_role
+     FROM documents d
+     WHERE d.id = $1`,
+    [projectId, userId]
+  );
+  if (!rows[0]) {
+    throw httpError('Project not found', 404);
+  }
+  return {
+    isOwner: rows[0].is_owner,
+    role: rows[0].member_role,
+    ownerId: rows[0].owner_id,
+  };
+}
+
+/**
+ * Authorisation guard for MCP tools that WRITE to the project — adding
+ * knowledge, uploading files, changing the title or description.
+ *
+ * Throws 403 unless the token's user is the owner, or a member with the
+ * 'editor' or 'admin' role. A 'viewer' token cannot reach a write tool.
+ *
+ */
+async function assertProjectWrite(projectId: string, userId: string): Promise<TokenAccess> {
+  const access = await loadTokenAccess(projectId, userId);
+  if (!canWrite(access.isOwner, access.role)) {
+    throw httpError(
+      'Forbidden: writing requires the project owner, or an editor or admin role',
+      403
+    );
+  }
+  return access;
+}
+
+/**
+ * Authorisation guard for MCP tools that ADMINISTER the project — granting or
+ * changing a member's role.
+ *
+ * Stricter than assertProjectWrite on purpose: handing role management to an
+ * editor would let an editor promote themselves to admin. Throws 403 unless
+ * the token's user is the owner or a member with the 'admin' role.
+ *
+ */
+async function assertProjectAdmin(projectId: string, userId: string): Promise<TokenAccess> {
+  const access = await loadTokenAccess(projectId, userId);
+  if (!canAdminister(access.isOwner, access.role)) {
+    throw httpError('Forbidden: you must be the project owner or an admin', 403);
+  }
+  return access;
+}
+
+/**
+ * POST /api/mcp/projects  (API-token auth) — refused.
+ *
+ * A project token is minted for ONE project; that is the whole of its grant, and
+ * `req.apiToken.projectId` is the only project any other tool here may touch. Creating a
+ * project is not work scoped to that project, so honouring it would let a token act
+ * outside the scope it was issued for — a token for project A minting projects B, C, D.
+ *
+ * This is deliberately NOT expressed as a role check. `canWrite` asks "may this user write
+ * to this project", and writing to project A does not authorize creating project B; there
+ * is no role that answers the question, and inventing one would dress a product decision
+ * up as an authorization rule. Project creation happens in the web app, where a person
+ * creates it, names it, and sees it. The same reasoning removes `admin` from the MCP
+ * `add_member` enum: an admin grant is a thing a human confirms.
+ *
+ * The web app's own POST /api/documents is unchanged and still lets any signed-in user
+ * create a project — that is the product's answer to the question, and this endpoint is
+ * no longer a second, unattended way to ask it.
+ */
+export async function createProject(_req: Request, res: Response): Promise<Response> {
+  return res.status(403).json({
+    error:
+      'A project API token cannot create a project. Create one in the web app, then ' +
+      'mint a token for it from that project\'s Access Tokens page.',
+  });
+}
+
+/**
+ * PUT /api/mcp/project/title  (API-token auth, owner/editor/admin)
+ * Body: { title }
+ * Renames the token's bound project. Target project = req.apiToken.projectId
+ * (never taken from arguments).
+ */
+export async function updateProjectTitle(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void | Response> {
+  try {
+    const { userId, tokenId, projectId } = req.apiToken!;
+    const { title } = (req.body || {}) as { title?: unknown };
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ error: 'title is required' });
+    }
+
+    await assertProjectWrite(projectId, userId);
+
+    const { rows } = await db.query<ProjectSummaryRow>(
+      `UPDATE documents SET title = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1
+       RETURNING id, title, summary, updated_at`,
+      [projectId, String(title).trim()]
+    );
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.change_project_title',
+      resourceTable: 'documents',
+      resourceId: projectId,
+      details: { title: rows[0].title },
+    });
+
+    return res.json({ project: rows[0] });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * PUT /api/mcp/project/description  (API-token auth, owner/editor/admin)
+ * Body: { description }
+ * Updates the token's bound project description (stored as summary).
+ */
+export async function updateProjectDescription(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void | Response> {
+  try {
+    const { userId, tokenId, projectId } = req.apiToken!;
+    const { description } = (req.body || {}) as { description?: unknown };
+    if (description === undefined || description === null) {
+      return res.status(400).json({ error: 'description is required' });
+    }
+
+    await assertProjectWrite(projectId, userId);
+
+    const summary = String(description).trim() || null;
+    const { rows } = await db.query<ProjectSummaryRow>(
+      `UPDATE documents SET summary = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1
+       RETURNING id, title, summary, updated_at`,
+      [projectId, summary]
+    );
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.change_project_description',
+      resourceTable: 'documents',
+      resourceId: projectId,
+      details: { length: summary ? summary.length : 0 },
+    });
+
+    return res.json({ project: rows[0] });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * POST /api/mcp/project/members  (API-token auth, owner/admin only)
+ * Body: { identifier (username or email), role? }
+ * Adds (or updates the role of) a member on the token's bound project.
+ */
+export async function addProjectMember(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void | Response> {
+  try {
+    const { userId, tokenId, projectId } = req.apiToken!;
+    const { identifier, role = 'editor' } = (req.body || {}) as {
+      identifier?: unknown;
+      role?: MemberRole;
+    };
+    if (!identifier || !String(identifier).trim()) {
+      return res.status(400).json({ error: 'identifier (username or email) is required' });
+    }
+    if (!ALLOWED_MEMBER_ROLES.includes(role)) {
+      return res
+        .status(400)
+        .json({ error: `role must be one of: ${ALLOWED_MEMBER_ROLES.join(', ')}` });
+    }
+
+    const { ownerId } = await assertProjectAdmin(projectId, userId);
+
+    const target = String(identifier).trim();
+    const userResult = await db.query<{ id: string; username: string; email: string }>(
+      `SELECT id, username, email FROM users WHERE username = $1 OR email = $1`,
+      [target]
+    );
+    const user = userResult.rows[0];
+    if (!user) {
+      return res.status(404).json({ error: `No user found matching "${target}"` });
+    }
+    if (user.id === ownerId) {
+      return res.status(409).json({ error: 'That user already owns this project' });
+    }
+
+    const { rows } = await db.query(
+      `INSERT INTO document_members (document_id, user_id, role)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (document_id, user_id)
+       DO UPDATE SET role = EXCLUDED.role
+       RETURNING user_id, role, added_at`,
+      [projectId, user.id, role]
+    );
+
+    const member = { ...rows[0], username: user.username, email: user.email };
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.add_member',
+      resourceTable: 'document_members',
+      resourceId: projectId,
+      details: { addedUserId: user.id, role },
+    });
+
+    return res.status(201).json({ member });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * POST /api/mcp/files  (API-token auth, owner/editor/admin)
+ * Body: { filename, content? , contentBase64? }
+ * Uploads a knowledge file to the token's bound project. Text files (.md/.txt)
+ * may be sent as `content`; binary files (.pdf) must be sent as base64 in
+ * `contentBase64`. The file is chunked, embedded with the project's model using
+ * the acting user's OpenRouter key, and stored. Owner/admin enforced from the
+ * token — never from arguments.
+ */
+export async function uploadFile(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void | Response> {
+  try {
+    const { userId, tokenId, projectId } = req.apiToken!;
+    const { filename, content, contentBase64 } = (req.body || {}) as {
+      filename?: unknown;
+      content?: unknown;
+      contentBase64?: unknown;
+    };
+
+    if (!filename || !String(filename).trim()) {
+      return res.status(400).json({ error: 'filename is required' });
+    }
+    const name = String(filename).trim();
+    if (!isAllowedFilename(name)) {
+      return res
+        .status(400)
+        .json({ error: `Unsupported file type. Allowed: ${ALLOWED_EXTENSIONS.join(', ')}` });
+    }
+    if (!content && !contentBase64) {
+      return res
+        .status(400)
+        .json({ error: 'Provide file contents as "content" (text) or "contentBase64"' });
+    }
+
+    // Decode to a buffer. Base64 wins when both are present.
+    let buffer: Buffer;
+    if (contentBase64) {
+      try {
+        buffer = Buffer.from(String(contentBase64), 'base64');
+      } catch {
+        return res.status(400).json({ error: 'contentBase64 is not valid base64' });
+      }
+    } else {
+      buffer = Buffer.from(String(content), 'utf8');
+    }
+
+    await assertProjectWrite(projectId, userId);
+
+    const apiKey = await getDecryptedOpenRouterKey(userId);
+    if (!apiKey) return res.status(412).json({ error: NO_KEY_MESSAGE });
+
+    const model = await getProjectModel(projectId);
+    const file = await ingestFile({
+      projectId,
+      userId,
+      apiKey,
+      model,
+      filename: name,
+      buffer,
+    });
+
+    await recordAudit({
+      userId,
+      tokenId,
+      actionType: 'mcp.upload_file',
+      resourceTable: 'document_files',
+      resourceId: file.id,
+      details: { filename: file.filename, chunks: file.chunk_count, model },
+    });
+
+    return res.status(201).json({ file });
+  } catch (err) {
+    return next(err);
+  }
+}
+
