@@ -129,8 +129,8 @@ regression check, three new gotchas: CommonJS output is load-bearing for the har
 the two default exports, and the wildcard-array bug), and
 `.agents/memory/state/repository-state.md`.
 
-Left stale on purpose, because they are instructions and the discovery protocol says to
-propose rather than edit: `.agents/rules/repository.md` still says every source file is
-CommonJS opening with `'use strict'`, names `src/config/migrate.js` and
-`src/utils/fileIngest.js`, and says there is no test suite. The finding is presented to
-the owner with the pull requests. `wiki/logs/` is untouched; it belongs to the release.
+`.agents/rules/repository.md` was first left stale, because it is an instruction and the
+discovery protocol says to propose rather than edit. The finding was presented and the
+owner selected it ("apply") on 2026-11-12, so it landed in its own commit on this branch:
+the CommonJS and `'use strict'` rule now describes TypeScript compiled to CommonJS, the two
+`src/*.js` paths name the `.ts` files, and Running it describes `npm test`. `wiki/logs/` is untouched; it belongs to the release.
