@@ -27,12 +27,12 @@ was built.
 
 | # | Title | Scope | Branch | PR |
 |---|---|---|---|---|
-| 1 | Task record | This file and its index row | `plan/typescript-migration` | |
-| 2 | Dependencies | Latest dependencies, TypeScript tooling, nodemon replaced by `tsx watch`, audit fix | `chore/dependencies` | |
-| 3 | TypeScript conversion | `tsconfig.json`, every `src/*.js` to typed `.ts`, `package.json` entry and scripts, Dockerfile build stage | `refactor/typescript` | |
-| 4 | Test suite | `npm test`: unit tests through tsx, then the four harnesses against `dist/` | `test/typescript-suite` | |
-| 5 | Documentation | `README.md`, `wiki/`, `.agents/wiki/` and state memory brought in line | `docs/typescript` | |
-| 6 | Release | Version, changelog, log index rows, closing entry | `release/3.0.0` | |
+| 1 | Task record | This file and its index row | `plan/typescript-migration` || #15 |
+| 2 | Dependencies | Latest dependencies, TypeScript tooling, nodemon replaced by `tsx watch`, audit fix | `chore/dependencies` || #16 |
+| 3 | TypeScript conversion | `tsconfig.json`, every `src/*.js` to typed `.ts`, `package.json` entry and scripts, Dockerfile build stage | `refactor/typescript` || #17 |
+| 4 | Test suite | `npm test`: unit tests through tsx, then the four harnesses against `dist/` | `test/typescript-suite` || #18 |
+| 5 | Documentation | `README.md`, `wiki/`, `.agents/wiki/` and state memory brought in line | `docs/typescript` || #19 |
+| 6 | Release | Version, changelog, log index rows, closing entry | `release/3.0.0` || #20 |
 
 Each branch stacks on the one before it. One pull request per branch.
 
@@ -150,3 +150,6 @@ string in `src/app.ts` and changing it is a behaviour change outside this migrat
 
 Verified at this commit: `npm run build` exit 0, `npm run typecheck` exit 0, `npm test`
 11 of 11, `npm audit` 0 vulnerabilities.
+
+Pull requests opened 2026-11-12 as one stacked chain, #15 through #20, filled into the
+plan table above. Nothing is merged; merging waits on the owner.
