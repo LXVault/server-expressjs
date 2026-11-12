@@ -23,7 +23,7 @@ tool, and no numbered migration files.
   boot**. Use `CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`,
   `CREATE INDEX IF NOT EXISTS`, and guarded `DO $$ ... END $$` blocks for anything those
   cannot express.
-* `src/config/migrate.js` reads that file and applies it on every boot unless
+* `src/config/migrate.ts` reads that file and applies it on every boot unless
   `AUTO_MIGRATE=false`. It runs the whole script in one round trip through the simple
   query protocol, so the script must stay parameter free.
 * A destructive statement, a `DROP` or a rewriting `ALTER`, is only acceptable inside a
@@ -38,7 +38,7 @@ this file.
 
 ## Layers
 
-Request flow is `src/index.js` to `src/app.js` to `src/routes/` to `src/controllers/` to
+Request flow is `src/index.ts` to `src/app.ts` to `src/routes/` to `src/controllers/` to
 `src/utils/`, with `src/config/` holding the pool, the environment reader and the migrator.
 
 * **Routes** wire paths to controllers and own middleware such as multer. They contain no
@@ -47,14 +47,16 @@ Request flow is `src/index.js` to `src/app.js` to `src/routes/` to `src/controll
   throw for expected conditions, they `return res.status(...)`.
 * **Utils** hold logic shared by more than one controller. Anything both the web path and
   the MCP path need goes here so the two behave identically. File ingestion is the worked
-  example: `src/utils/fileIngest.js` is called by both `fileController` and `mcpController`.
-* Every source file is CommonJS and opens with `'use strict'`.
+  example: `src/utils/fileIngest.ts` is called by both `fileController` and `mcpController`.
+* Every source file is strict TypeScript under `src/`, compiled by `tsc` to CommonJS in
+  `dist/`. Relative imports carry `.js`. Keep the CommonJS output: the verification
+  harnesses stub the pool through `require.cache`.
 
 ## Two authentication paths, never mixed
 
-* `src/middleware/auth.js` verifies a JWT and populates `req.user`. It guards the human
+* `src/middleware/auth.ts` verifies a JWT and populates `req.user`. It guards the human
   facing routes under `/api/documents`, `/api/me`, `/api/tokens`.
-* `src/middleware/apiToken.js` verifies a per project token and populates `req.apiToken`
+* `src/middleware/apiToken.ts` verifies a per project token and populates `req.apiToken`
   with `{ tokenId, userId, projectId, username, projectTitle, role }`. It guards `/api/mcp`.
   `role` is `'owner'` or the member's live role, read fresh on every request, so a demotion
   stops writes on the next call rather than at the next rotation.
@@ -65,20 +67,20 @@ language model, so any identity or project taken from arguments is a privilege e
 a prompt injection can reach. Do not add an MCP route that accepts a project id, a user
 id, or a role as a parameter.
 
-**Role checks go through `src/utils/roles.js`, not through a controller helper.**
+**Role checks go through `src/utils/roles.ts`, not through a controller helper.**
 `canWrite(isOwner, role)` and `canAdminister(isOwner, role)` are the only two questions the
 application asks, and they take ownership as a separate flag because the owner is
 `documents.owner_id` and not a role. `assertProjectWrite` and `assertProjectAdmin` in
-`src/controllers/mcpController.js` are callers of those, not the definition, and the web
+`src/controllers/mcpController.ts` are callers of those, not the definition, and the web
 path in `documentController.js` calls the same two. An inline `isOwner || role === 'admin'`
 puts back the bug that file exists to prevent.
 
 ## Embeddings
 
 * There is **no server owned OpenRouter key**. Every embedding call spends the acting
-  user's own key, decrypted per request by `src/utils/userKeys.js` from
+  user's own key, decrypted per request by `src/utils/userKeys.ts` from
   `user_openrouter_keys`. A missing key is a `412`, never a fallback to someone else's key.
-* All outbound embedding traffic goes through `embedText` in `src/utils/embeddings.js`.
+* All outbound embedding traffic goes through `embedText` in `src/utils/embeddings.ts`.
   Do not call the OpenRouter endpoint directly from a controller.
 * **Content and vectors are separate tables.** `document_chunks` holds the text;
   `document_chunk_embeddings` holds one vector per `(chunk_id, model_name)`. Never add an
@@ -90,7 +92,7 @@ puts back the bug that file exists to prevent.
   the explicit delete, and it refuses to touch the model currently selected.
 * **Report coverage wherever you report a chunk count.** A chunk with no row for the
   current model is invisible to search, so a bare count makes an uncovered knowledge base
-  look empty. Use `src/utils/embeddingCoverage.js` rather than counting chunks inline.
+  look empty. Use `src/utils/embeddingCoverage.ts` rather than counting chunks inline.
 * The `embedding` column is a **dimensionless** `vector` so projects can choose models of
   different sizes, and two models' rows can sit in the table at once. That is why there is
   no HNSW or ivfflat index on it: pgvector's ANN indexes need a fixed dimension. Search
@@ -116,12 +118,13 @@ for it in new code.
 * A second schema source, a migrations directory, or an ORM.
 * A global or shared OpenRouter API key, in code, in `.env.example`, or in a default.
 * Logging or auditing that records a decrypted API key, a token, or a password hash.
-  `src/utils/audit.js` records the actor and the action, never the secret.
+  `src/utils/audit.ts` records the actor and the action, never the secret.
 * An MCP route whose authorization depends on request arguments.
 
 ## Running it
 
-`npm run dev` for a reloading server, `npm start` for a plain one. There is no test suite
-and no linter configured, so verification is manual: boot the server against a pgvector
-database and exercise the affected route. Say so plainly when reporting work rather than
-implying a suite ran.
+`npm run dev` for a reloading server, `npm start` for the compiled one. `npm test` builds,
+type-checks and runs the unit tests and the four harnesses against `dist/`. It never touches
+a real database, so a schema or SQL change still needs a boot against pgvector and the
+affected route exercised. Say so plainly when reporting work rather than implying the suite
+covered it. There is no linter.
