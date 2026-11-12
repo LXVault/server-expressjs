@@ -27,12 +27,12 @@ was built.
 
 | # | Title | Scope | Branch | PR |
 |---|---|---|---|---|
-| 1 | Task record | This file and its index row | `plan/typescript-migration` || #15 |
-| 2 | Dependencies | Latest dependencies, TypeScript tooling, nodemon replaced by `tsx watch`, audit fix | `chore/dependencies` || #16 |
-| 3 | TypeScript conversion | `tsconfig.json`, every `src/*.js` to typed `.ts`, `package.json` entry and scripts, Dockerfile build stage | `refactor/typescript` || #17 |
-| 4 | Test suite | `npm test`: unit tests through tsx, then the four harnesses against `dist/` | `test/typescript-suite` || #18 |
-| 5 | Documentation | `README.md`, `wiki/`, `.agents/wiki/` and state memory brought in line | `docs/typescript` || #19 |
-| 6 | Release | Version, changelog, log index rows, closing entry | `release/3.0.0` || #20 |
+| 1 | Task record | This file and its index row | `plan/typescript-migration` | #15 |
+| 2 | Dependencies | Latest dependencies, TypeScript tooling, nodemon replaced by `tsx watch`, audit fix | `chore/dependencies` | #16 |
+| 3 | TypeScript conversion | `tsconfig.json`, every `src/*.js` to typed `.ts`, `package.json` entry and scripts, Dockerfile build stage | `refactor/typescript` | #17 |
+| 4 | Test suite | `npm test`: unit tests through tsx, then the four harnesses against `dist/` | `test/typescript-suite` | #18 |
+| 5 | Documentation | `README.md`, `wiki/`, `.agents/wiki/` and state memory brought in line | `docs/typescript` | #19 |
+| 6 | Release | Version, changelog, log index rows, closing entry | `release/3.0.0` | #20 |
 
 Each branch stacks on the one before it. One pull request per branch.
 
