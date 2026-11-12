@@ -3,7 +3,7 @@
 /**
  * T8 verification harness — the encryption KDF.
  *
- * Runs the REAL src/utils/crypto.js, the REAL src/utils/userKeys.js and the REAL
+ * Runs the REAL compiled dist/utils/crypto.js, the REAL dist/utils/userKeys.js and the REAL
  * PUT /api/me/openrouter-key route. Only the pg pool is stubbed, because there
  * is no PostgreSQL in this environment.
  *
@@ -154,16 +154,16 @@ const pool = {
   },
 };
 
-require.cache[require.resolve(path.join(ROOT, 'src/config/db'))] = {
-  id: path.join(ROOT, 'src/config/db'),
-  filename: path.join(ROOT, 'src/config/db'),
+require.cache[require.resolve(path.join(ROOT, 'dist/config/db'))] = {
+  id: path.join(ROOT, 'dist/config/db'),
+  filename: path.join(ROOT, 'dist/config/db'),
   loaded: true,
   exports: { pool, query: pool.query, healthCheck: async () => true },
 };
 
-const crypto = APP('src/utils/crypto');
-const { getDecryptedOpenRouterKey } = APP('src/utils/userKeys');
-const { signToken } = APP('src/utils/jwt');
+const crypto = APP('dist/utils/crypto');
+const { getDecryptedOpenRouterKey } = APP('dist/utils/userKeys');
+const { signToken } = APP('dist/utils/jwt');
 
 async function main() {
   // --- crypto.js -----------------------------------------------------------
@@ -337,7 +337,7 @@ async function main() {
 
   section('PUT /api/me/openrouter-key');
 
-  const app = APP('src/app');
+  const app = APP('dist/app').default;
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;

@@ -34,7 +34,7 @@ function check(name, condition, detail) {
 // decrypting something a real deploy would have written.
 process.env.ENCRYPTION_KEY = 't8-original-encryption-key';
 process.env.NODE_ENV = 'test';
-const { encrypt, decrypt } = require(path.join(ROOT, 'src/utils/crypto'));
+const { encrypt, decrypt } = require(path.join(ROOT, 'dist/utils/crypto'));
 
 const PROBE = 'sk-or-v1-written-by-an-earlier-process';
 
@@ -43,7 +43,7 @@ function decryptInChild(encryptionKey, parts) {
   const script = `
     const path = require('path');
     const ROOT = ${JSON.stringify(ROOT)};
-    const { decrypt } = require(path.join(ROOT, 'src/utils/crypto'));
+    const { decrypt } = require(path.join(ROOT, 'dist/utils/crypto'));
     decrypt(${JSON.stringify(parts)})
       .then((v) => { process.stdout.write('OK:' + v); })
       .catch((e) => { process.stdout.write('ERR:' + e.message); });

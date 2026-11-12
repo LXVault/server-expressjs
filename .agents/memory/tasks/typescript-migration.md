@@ -96,3 +96,23 @@ Found, not fixed: Express 5 delivers the `*model` wildcard as an array of segmen
 `deleteModelEmbeddings` receives `["openai","text-embedding-3-small"]`,
 `normalizeModelName` returns null, and `DELETE /api/documents/:id/embeddings/*model`
 answers 400 for every model. This predates the migration and is left for its own change.
+
+### Task 4 — test/typescript-suite
+
+`npm test` now exists: `npm run build`, then `npm run typecheck` (`tsconfig.test.json`
+checks `src/` and `test/` together without emitting), then `tsx --test test/*.test.ts`
+on the built-in `node:test` runner.
+
+* `test/units.test.ts` covers the pure helpers from the TypeScript source: roles,
+  model-name normalization, chunking and extensions, token generation and hashing, JWT
+  sign and verify, the scrypt round trip and `httpError`. It also pins the wildcard
+  finding from task 3: `normalizeModelName` of an array is null.
+* `test/harnesses.test.ts` runs the four harnesses as child processes against `dist/`
+  and fails on a non-zero exit.
+
+The harnesses now load `dist/` rather than `src/`, and read the config and app through
+`.default`, since those two modules use a default export. They still stub the pool
+through `require.cache`, which works because the output is CommonJS.
+
+Verified: `npm test` passes 11 of 11 (7 unit, 4 harness), and the harnesses inside it
+pass 129 of 129.
